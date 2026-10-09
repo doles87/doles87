@@ -206,8 +206,12 @@ function render(content, { tab, wide = false, feedback = true } = {}) {
   }
 }
 
-function placeOptions(selected, list = state.places) {
-  return list.map((p) => html`<option ${p === selected ? raw('selected') : ''}>${p}</option>`);
+function placeOptions(selected, list = null) {
+  const opt = (p) => html`<option ${p === selected ? raw('selected') : ''}>${p}</option>`;
+  if (list) return list.map(opt);
+  // Vse postaje: po državah, znotraj države po abecedi.
+  return Object.entries(state.countries || {}).map(([code, name]) => html`<optgroup label="${name}">${state.places
+    .filter((p) => state.country?.[p] === code).sort((a, b) => a.localeCompare(b, 'sl')).map(opt)}</optgroup>`);
 }
 
 function requireLogin() {
@@ -216,13 +220,6 @@ function requireLogin() {
   return false;
 }
 
-
-const KEY_CITIES = ['Milano', 'Verona', 'Benetke', 'Trst', 'Koper', 'Postojna', 'Ljubljana'];
-
-function corridor(from, to) {
-  const on = new Set([city(from || ''), city(to || '')]);
-  return html`<div class="corridor" aria-hidden="true"><ol>${KEY_CITIES.map((c) => html`<li class="${on.has(c) ? 'on' : ''}"><i></i>${c}</li>`)}</ol></div>`;
-}
 
 function loadSearch() {
   try { return JSON.parse(sessionStorage.getItem('pv_search') || 'null'); } catch { return null; }
@@ -244,18 +241,6 @@ function loadLeaflet() {
   return leafletLoading;
 }
 
-// Ista pravila kot ridePoints na strežniku: kraji ob glavni poti + izbrani ovinki, v smeri vožnje.
-function routePoints(origin, destination, stops = []) {
-  const a = state.places.indexOf(origin);
-  const b = state.places.indexOf(destination);
-  if (a === -1 || b === -1 || a === b) return [origin, destination];
-  const dir = a < b ? 1 : -1;
-  const main = new Set(state.main || []);
-  const mid = [];
-  for (let i = a + dir; i !== b; i += dir) if (main.has(state.places[i]) || stops.includes(state.places[i])) mid.push(state.places[i]);
-  return [origin, ...mid, destination];
-}
-
 function distKm([lat1, lng1], [lat2, lng2]) {
   const rad = Math.PI / 180;
   const a = Math.sin(((lat2 - lat1) * rad) / 2) ** 2
@@ -264,7 +249,7 @@ function distKm([lat1, lng1], [lat2, lng2]) {
 }
 const km = (n) => `${n < 10 ? n.toFixed(1).replace('.', ',') : Math.round(n)} km`;
 
-// Točke koridorja v radiu od izbrane lokacije, najbližja prva.
+// Postaje v radiu od izbrane lokacije, najbližja prva.
 function placesWithin(point, radius) {
   return state.places.map((p) => ({ place: p, km: distKm(point, state.coords[p]) }))
     .filter((x) => x.km <= radius).sort((a, b) => a.km - b.km);
@@ -327,7 +312,6 @@ function viewHome() {
       <div class="muted small" style="font-weight:500">Potnik</div>
       <h1>Kam se peljete<br>nazaj?</h1>
     </div>
-    <div id="corr">${corridor(s.from, s.to)}</div>
     <form id="search" class="stack" novalidate>
       <div class="seg" role="group" aria-label="Kje vstopiš">
         <button type="button" data-mode="place">Izberi kraj</button>
@@ -364,16 +348,8 @@ function viewHome() {
   </main>`, { tab: '#/' });
 
   const form = app.querySelector('#search');
-  const nearest = () => {
-    if (mode !== 'map' || !form.lat.value) return '';
-    return placesWithin([Number(form.lat.value), Number(form.lng.value)], Number(form.radius.value))[0]?.place || '';
-  };
-  const refresh = () => { app.querySelector('#corr').innerHTML = piece(corridor(mode === 'map' ? nearest() : form.from.value, form.to.value)); };
-  form.from.addEventListener('change', refresh);
-  form.to.addEventListener('change', refresh);
   app.querySelector('#swap').addEventListener('click', () => {
     [form.from.value, form.to.value] = [form.to.value, form.from.value];
-    refresh();
   });
 
   // Iskanje z zemljevida
@@ -384,10 +360,10 @@ function viewHome() {
     const near = placesWithin([Number(form.lat.value), Number(form.lng.value)], Number(form.radius.value));
     box.innerHTML = near.length
       ? piece(html`Postaje v radiu: ${near.map((x, i) => html`${i ? ', ' : ''}<b style="color:var(--ink)">${x.place}</b> (${km(x.km)})`)}`)
-      : piece(html`<span style="color:var(--red)">V tem radiu ni nobene postaje na koridorju — povečaj radij ali izberi drugo točko.</span>`);
+      : piece(html`<span style="color:var(--red)">V tem radiu ni nobene postaje — povečaj radij ali izberi drugo točko.</span>`);
     app.querySelector('#map-hint').hidden = true;
   };
-  const onPick = ({ lat, lng }) => { form.lat.value = lat; form.lng.value = lng; showNear(); refresh(); };
+  const onPick = ({ lat, lng }) => { form.lat.value = lat; form.lng.value = lng; showNear(); };
   async function setMode(m) {
     mode = m;
     form.querySelectorAll('[data-mode]').forEach((b) => b.setAttribute('aria-pressed', b.dataset.mode === m));
@@ -395,7 +371,6 @@ function viewHome() {
     app.querySelector('#from-field').hidden = m === 'map';
     app.querySelector('#from-div').hidden = m === 'map';
     app.querySelector('#swap').hidden = m === 'map';
-    refresh();
     if (m === 'map' && !picker) {
       try {
         picker = await mountPickMap(app.querySelector('#map'), { lat: form.lat.value, lng: form.lng.value, radius: form.radius.value }, onPick);
@@ -408,7 +383,6 @@ function viewHome() {
     app.querySelector('#radius-out').textContent = `${form.radius.value} km`;
     picker?.setRadius(Number(form.radius.value));
     showNear();
-    refresh();
   });
   app.querySelector('#locate').addEventListener('click', () => {
     if (!('geolocation' in navigator)) { toast('Ta brskalnik ne podpira lokacije.'); return; }
@@ -463,7 +437,7 @@ async function viewResults({ query }) {
   const reqFrom = byMap ? near?.[0]?.place : q.from;
 
   render(html`${head}<main>
-    ${byMap && near ? html`<div class="small muted">${near.length ? html`Postaje v radiu: ${near.map((x, i) => html`${i ? ', ' : ''}<b style="color:var(--ink)">${x.place}</b> (${km(x.km)})`)}` : 'V izbranem radiu ni nobene postaje na koridorju.'}</div>` : ''}
+    ${byMap && near ? html`<div class="small muted">${near.length ? html`Postaje v radiu: ${near.map((x, i) => html`${i ? ', ' : ''}<b style="color:var(--ink)">${x.place}</b> (${km(x.km)})`)}` : 'V izbranem radiu ni nobene postaje.'}</div>` : ''}
     ${rides.length ? html`<h2>${rides.length} ${word} na tvoji poti</h2>` : offerRides.length ? '' : html`<div class="card empty">
       <b>Za ta termin še ni prostih voženj.</b>
       <p class="small">Poskusi z daljšim časovnim oknom, drugim dnem ali večjim radijem — ali spodaj obvesti prevoznike, da iščeš prevoz.</p>
@@ -710,7 +684,7 @@ async function viewMyBookings() {
         ${r.matches ? html`<a class="btn sm" href="${searchLink(r)}">Poglej vožnje</a>` : ''}
         <button class="btn ghost sm" data-close-req="${r.id}">Zapri iskanje</button></div>
     </article>`)}${bookings.length ? html`<h2>Rezervacije</h2>` : ''}` : ''}
-    ${bookings.length || requests.length ? '' : html`<div class="card empty"><b>Še nimaš rezervacij.</b><p class="small">Poišči prazno povratno vožnjo na koridorju Milano–Ljubljana.</p><a class="btn sm" href="#/">Poišči prevoz</a></div>`}
+    ${bookings.length || requests.length ? '' : html`<div class="card empty"><b>Še nimaš rezervacij.</b><p class="small">Poišči prazno povratno vožnjo med več kot 130 postajami po Sloveniji in sosednjih državah.</p><a class="btn sm" href="#/">Poišči prevoz</a></div>`}
     ${bookings.map((b) => html`<article class="card" data-id="${b.id}">
       <div class="between">
         <div style="font-size:16px;font-weight:700">${city(b.pickup)} → ${city(b.dropoff)} ${b.kind === 'private' ? html`<span class="pill wait" style="vertical-align:middle">zasebno</span>` : ''}</div>
@@ -1062,7 +1036,7 @@ async function viewCarrier() {
             ${mine.length ? '' : html`<a class="btn teal sm" href="#/prevoznik/nova?${new URLSearchParams({ from: q.origin, to: q.destination, date: q.date })}">Objavi vožnjo</a>`}
           </div>
         </article>`;
-      }) : html`<div class="card empty small">Trenutno nihče ne išče prevoza na koridorju.</div>`}` : ''}
+      }) : html`<div class="card empty small">Trenutno nihče ne išče prevoza.</div>`}` : ''}
     ${past.length ? html`<h2>Pretekle in zaključene</h2>${past.map(rideCard)}` : ''}
   </main>`, { tab: '#/prevoznik' });
 
@@ -1178,26 +1152,29 @@ async function viewNewRide({ query }) {
 
   const form = app.querySelector('#ride');
   const selected = new Set();
-  const main = new Set(state.main || []);
+  let route = [];
+  // Pot in ovinke izračuna strežnik (cestno omrežje); osvežita se ob vsaki spremembi.
   function drawStops() {
-    const a = state.places.indexOf(form.origin.value);
-    const b = state.places.indexOf(form.destination.value);
-    const between = a < b ? state.places.slice(a + 1, b) : state.places.slice(b + 1, a).reverse();
-    [...selected].forEach((s) => { if (!between.includes(s)) selected.delete(s); });
     const box = app.querySelector('#stops');
-    box.innerHTML = between.length
-      ? piece(between.map((p) => (main.has(p)
-        ? html`<span class="chip auto" title="Na poti — samodejno">✓ ${p}</span>`
-        : html`<button type="button" class="chip" data-stop="${p}" aria-pressed="${selected.has(p)}">${selected.has(p) ? '✓ ' : '+ '}${p} <span class="muted" style="font-weight:500">ovinek</span></button>`)))
-      : '<span class="small muted">Med izbranima točkama ni vmesnih krajev.</span>';
+    const mid = route.slice(1, -1);
+    const chips = [
+      ...mid.map((p) => (selected.has(p)
+        ? html`<button type="button" class="chip" data-stop="${p}" aria-pressed="true">✓ ${p} <span class="muted" style="font-weight:500">ovinek</span></button>`
+        : html`<span class="chip auto" title="Na poti — samodejno">✓ ${p}</span>`)),
+      ...detours.map((d) => html`<button type="button" class="chip" data-stop="${d.place}" aria-pressed="false">+ ${d.place} <span class="muted" style="font-weight:500">+${d.km} km</span></button>`),
+    ];
+    box.innerHTML = chips.length ? piece(chips) : '<span class="small muted">Med izbranima točkama ni drugih postaj.</span>';
     box.querySelectorAll('[data-stop]').forEach((chip) => chip.addEventListener('click', () => {
       const p = chip.dataset.stop;
       if (selected.has(p)) selected.delete(p); else selected.add(p);
-      drawStops();
+      drawPrice();
     }));
     drawRequests();
+  }
+  let detours = [];
+  function routeChanged() {
+    selected.clear();
     drawPrice();
-    return between;
   }
   // Predlog cene iz prodaje na podobnih poteh; osveži se ob spremembi poti.
   let priceTimer;
@@ -1213,6 +1190,9 @@ async function viewNewRide({ query }) {
       let t;
       try { t = await api(`/carrier/price-suggestion?${params}`); } catch { box.innerHTML = ''; return; }
       if (seq !== priceSeq) return;
+      route = t.route;
+      detours = t.detours.slice(0, 30);
+      drawStops();
       box.innerHTML = piece(html`<div class="card stack price-tip">
         <div class="between" style="align-items:center">
           <div><div class="small muted">Predlagana cena na sedež · ${t.km} km</div>
@@ -1235,7 +1215,6 @@ async function viewNewRide({ query }) {
   }
   // Iskanja potnikov, ki jih ta vožnja (po trenutni izbiri) lahko pelje na izbrani dan.
   function drawRequests() {
-    const route = routePoints(form.origin.value, form.destination.value, [...selected]);
     const fits = requests.filter((q) => q.date === form.date.value
       && route.indexOf(q.origin) !== -1 && route.indexOf(q.origin) < route.indexOf(q.destination));
     app.querySelector('#line-requests').innerHTML = fits.length ? piece(html`<div class="notice teal">${svg(I.user, { size: 17 })}<div>
@@ -1243,24 +1222,23 @@ async function viewNewRide({ query }) {
       ${fits.map((q) => html`<div class="small" style="margin-top:4px">${q.passenger_name} · ${city(q.origin)} → ${city(q.destination)} · ${q.time_from}–${q.time_to} · ${persons(q.seats)}</div>`)}
       <div class="small muted" style="margin-top:4px">Ko objaviš vožnjo, jih lahko pokličeš s seznama »Potniki iščejo prevoz«.</div></div></div>`) : '';
   }
-  form.origin.addEventListener('change', drawStops);
-  form.destination.addEventListener('change', drawStops);
+  form.origin.addEventListener('change', routeChanged);
+  form.destination.addEventListener('change', routeChanged);
   form.date.addEventListener('change', drawRequests);
   form.private_allowed.addEventListener('change', () => { app.querySelector('#private-price').hidden = !form.private_allowed.checked; });
-  drawStops();
+  drawPrice();
 
   form.addEventListener('submit', (e) => {
     e.preventDefault();
     submitting(form, async () => {
       const d = formData(form);
       if (d.origin === d.destination) throw new Error('Začetek in cilj morata biti različna.');
-      const between = drawStops();
       await api('/rides', {
         method: 'POST',
         body: {
           origin: d.origin,
           destination: d.destination,
-          stops: between.filter((p) => selected.has(p)),
+          stops: [...selected],
           departure_at: `${d.date}T${d.time}`,
           seats_total: Number(d.seats_total),
           price_per_seat: Number(d.price_per_seat),
@@ -1427,7 +1405,7 @@ async function viewAdmin() {
   const panels = { carriers: carriersHtml, rides: ridesHtml, bookings: bookingsHtml, users: usersHtml, feedback: feedbackHtml };
 
   render(html`${head}<div class="admin-layout">
-    <div><h1 style="font-size:24px">Pregled</h1><div class="muted small">Koridor Milano ↔ Ljubljana · testna faza</div></div>
+    <div><h1 style="font-size:24px">Pregled</h1><div class="muted small">Omrežje postaj SI · IT · HR · AT · DE · HU · SK · RS · testna faza</div></div>
     <div class="kpis">
       <div class="kpi"><div class="k">Provizija (${Math.round(data.commission * 100)} %)</div><div class="v">${eur(s.commission_completed)}</div><div class="s">od opravljenih ${eur(s.revenue_completed)}</div></div>
       <div class="kpi"><div class="k">Opravljene vožnje</div><div class="v">${s.rides_completed}</div><div class="s">${s.rides_upcoming} prihajajočih</div></div>
@@ -1511,7 +1489,8 @@ async function start() {
     const [, places, config] = await Promise.all([loadMe(), api('/places'), api('/config')]);
     state.places = places.places;
     state.coords = places.coords || {};
-    state.main = places.main || [];
+    state.country = places.country || {};
+    state.countries = places.countries || {};
     state.config = config;
   } catch {
     app.innerHTML = '<main><div class="err">Strežnik trenutno ni dosegljiv. Poskusi znova čez minuto.</div></main>';

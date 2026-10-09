@@ -51,12 +51,16 @@ test('vožnja iz Milana pokrije kraje na poti, cena odseka, iskanje z zemljevida
   // Vmesna točka izven poti ni dovoljena.
   r = await carrier('/rides', { method: 'POST', body: { origin: MILANO, destination: LJ, stops: [MXP], departure_at: `${date}T08:00`, seats_total: 8, price_per_seat: 45 } });
   assert.equal(r.status, 400);
-  r = await carrier('/rides', { method: 'POST', body: { origin: MILANO, destination: LJ, stops: [], departure_at: `${date}T08:00`, seats_total: 8, price_per_seat: 45 } });
+  r = await carrier('/rides', { method: 'POST', body: { origin: MILANO, destination: LJ, stops: [KOPER], departure_at: `${date}T08:00`, seats_total: 8, price_per_seat: 45 } });
   assert.equal(r.status, 201, JSON.stringify(r.data));
   const rideId = r.data.id;
 
   const ride = (await ana(`/rides/${rideId}`)).data.ride;
   for (const p of [VERONA, TRST, KOPER, POSTOJNA]) assert.ok(ride.route.includes(p), `pot vsebuje ${p}`);
+  // Koper je ovinek: brez izrecne vmesne točke ni na poti iz Milana, Padova pa je samodejno.
+  const plain = (await carrier('/carrier/price-suggestion?' + new URLSearchParams({ origin: MILANO, destination: LJ }))).data;
+  assert.ok(!plain.route.includes(KOPER) && plain.route.includes('Padova'), plain.route.join(', '));
+  assert.ok(plain.detours.some((d) => d.place === KOPER), 'Koper je med ponujenimi ovinki');
   assert.ok(!ride.route.includes(TREVISO), 'ovinek ni samodejno na poti');
   assert.equal(ride.segment_prices[`0-${ride.route.length - 1}`], 4500);
 

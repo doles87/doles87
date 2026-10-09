@@ -1,5 +1,6 @@
 // Sledenje vozniku, izračun prihoda (ETA) in pravila odpovedi.
-import { PLACES, PLACE_SET, PLACE_COORDS, MAIN_PLACES } from './places.js';
+import { PLACE_COORDS } from './places.js';
+import { routePoints } from './route.js';
 
 // Pravila odpovedi; vrednosti lahko prepišeš s spremenljivkami okolja (wrangler.toml [vars]).
 export function policy(env) {
@@ -73,17 +74,11 @@ async function googleSeconds(env, coords) {
 
 export const explicitStops = (ride) => JSON.parse(ride.stops || '[]');
 
-// Celotna pot vožnje v smeri vožnje: začetek, kraji ob glavni poti med začetkom in ciljem,
-// izrecno dodane vmesne točke (tudi ovinki) in cilj. Vožnja Milano → Ljubljana tako pokrije
-// tudi Verono, Benetke, Trst, Koper, Postojno …, ne da bi jih prevoznik moral naštevati.
+// Celotna pot vožnje po cestnem omrežju (glej route.js): začetek, postaje ob poti, izrecne vmesne
+// točke (tudi ovinki) in cilj. Vožnja Milano → Ljubljana tako pokrije Brescio, Verono, Padovo, Mestre,
+// Benetke, Trst, Sežano, Postojno …, ne da bi jih prevoznik moral naštevati.
 export function ridePoints(ride) {
-  const a = PLACES.indexOf(ride.origin);
-  const b = PLACES.indexOf(ride.destination);
-  const dir = a < b ? 1 : -1;
-  const inside = new Set(explicitStops(ride));
-  for (let i = a + dir; i !== b; i += dir) if (MAIN_PLACES.has(PLACES[i])) inside.add(PLACES[i]);
-  const middle = [...inside].filter((p) => PLACE_SET.has(p) && p !== ride.origin && p !== ride.destination).sort((x, y) => (PLACES.indexOf(x) - PLACES.indexOf(y)) * dir);
-  return [ride.origin, ...middle, ride.destination];
+  return routePoints(ride.origin, ride.destination, explicitStops(ride));
 }
 
 export function routeKm(points) {

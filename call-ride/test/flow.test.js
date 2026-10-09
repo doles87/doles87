@@ -87,7 +87,7 @@ test('celoten tok: registracija, preverba, objava, iskanje, rezervacija, zaklju�
   assert.equal(r.data.rides.find((x) => x.id === rideId).shared_total, 4400, 'cela pot = polna cena');
   r = await passenger(`/rides/search?${new URLSearchParams({ from: POSTOJNA, to: TRST, date, seats: 2 })}`);
   assert.ok(!r.data.rides.some((x) => x.id === rideId), 'napa훾na smer se ne sme ujemati');
-  r = await passenger(`/rides/search?${new URLSearchParams({ from: TRST, to: POSTOJNA, date, seats: 2, max_total: 10 })}`);
+  r = await passenger(`/rides/search?${new URLSearchParams({ from: TRST, to: POSTOJNA, date, seats: 2, max_total: 9 })}`);
   assert.ok(!r.data.rides.some((x) => x.id === rideId), 'filter najve훾je cene');
 
   // Rezervacija 3 sede탑ev, nato druga za 2 sede탑a (preve훾) mora pasti.

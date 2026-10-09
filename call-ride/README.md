@@ -1,6 +1,6 @@
 # Call ride
 
-Platforma za prazne povratne vožnje prevoznikov na koridorju **Milano ↔ Verona ↔ Benetke ↔ Trst ↔ Koper ↔ Postojna ↔ Ljubljana**.
+Platforma za prazne povratne vožnje prevoznikov po omrežju **138 postaj** (letališča in mesta) v Sloveniji, severni Italiji, na Hrvaškem, v Avstriji, južni Nemčiji, na Madžarskem, Slovaškem in v Srbiji — po vzoru omrežja skupnih prevozov, kot ga ima GoOpti.
 Prevoznik, ki se vrača prazen, objavi vožnjo, potniki na poti pa rezervirajo sedež ali cel kombi.
 
 Tehnologija: en Cloudflare Worker (API + statične datoteke), baza Cloudflare D1, vmesnik v čistem JavaScriptu brez build koraka.
@@ -21,7 +21,7 @@ Tehnologija: en Cloudflare Worker (API + statične datoteke), baza Cloudflare D1
 
 **Prevoznik**
 - registracija s podatki za preverbo (matična, davčna, vrsta in številka licence, licenca Skupnosti, veljavnost, vozilo)
-- objava vožnje: kraji ob glavni poti (npr. Milano → Ljubljana: Bergamo, Brescia, Verona, Vicenza, Padova, Mestre, Benetke, Trst, Koper, Sežana, Postojna …) so na poti **samodejno**; ovinke (letališča, središča mest) doda sam
+- objava vožnje: pot se izračuna po cestnem omrežju; mesta na njej (npr. Milano → Ljubljana: Bergamo, Brescia, Verona, Vicenza, Padova, Mestre, Benetke, Palmanova, Trst, Sežana, Postojna …) so na poti **samodejno**; ovinke (letališča, turistični kraji, mesta izven poti, npr. Koper) aplikacija ponudi z dolžino ovinka in jih prevoznik doda z enim klikom
 - **potniki iščejo prevoz**: seznam iskanj na koridorju z oznako »na tvoji poti«, telefon potnika, gumb »Objavi vožnjo« s predizpolnjenim obrazcem; obrazec za novo vožnjo sproti pokaže potnike na izbrani liniji in dan
 - potrditev rezervacije z obrazcem: dogovorjen čas prevzema, vnaprej izpolnjen s predlogom po oceni poti; pri ponudbi potnika gumb »Sprejmi €X«
 - **predlog cene** pri objavi vožnje: cena na km, po kateri se je na podobnih poteh prodalo največ sedežev (utežena mediana, razpon 25.–75. percentil), povprečje voženj z ≥ 75 % zasedenostjo, opozorilo na ceno voženj brez potnikov in število potnikov, ki iščejo prevoz na liniji. Dokler na podobnih poteh nista prodana vsaj 3 sedeži, je predlog začetna ocena `PRICE_BASELINE_EUR_PER_KM` (0,10 €/km)
@@ -56,6 +56,12 @@ Pristojbina ostane platformi. Vse vrednosti se nastavijo v `wrangler.toml` (`[va
 **Pomembno:** v testni fazi se plačuje prevozniku ob vožnji, zato se pristojbina samo *zabeleži* (vidna v adminu)
 in se ne bremeni kartice. Za dejansko zaračunavanje je naslednji korak Stripe: ob rezervaciji zadržanje sredstev,
 ob zaključku zajem, ob pozni odpovedi zajem pristojbine.
+
+## Postaje in poti
+
+- `src/places.js`: postaje s koordinatami, državo in vrsto (`city`/`stop` — lahko so samodejno na poti; `airport`/`resort` — le kot začetek, cilj ali izrecni ovinek). Imena so ključ v bazi, zato obstoječih ne spreminjaj; nove dodaš kar v seznam.
+- `src/route.js`: cestno omrežje (verige postaj po glavnih cestah z faktorjem za počasnejše regionalne ceste, letališča in turistični kraji kot priključki). Pot vožnje je najkrajša pot skozi izrecne vmesne točke; na poti so še mesta, oddaljena največ 4 km. Nova postaja mora biti povezana v omrežje (`graphCheck()` vrne nepovezane).
+- Seznam je sestavljen iz javno dostopnih podatkov o omrežju; koordinate so približne (središče mesta, avtobusna postaja ali letališče).
 
 ## Sledenje in Google Maps
 
@@ -107,7 +113,8 @@ npm test                   # v drugem terminalu: celoten tok prek API-ja
 ```
 src/worker.js         API in usmerjanje
 src/live.js           sledenje, izračun prihoda (Google Routes API), pravila odpovedi
-src/places.js         točke koridorja s koordinatami (main: kraj ob glavni poti / ovinek)
+src/places.js         postaje s koordinatami, državo in vrsto
+src/route.js          cestno omrežje, pot vožnje, ponujeni ovinki
 migrations/           shema baze D1
 public/               vmesnik (index.html, app.js, styles.css)
 test/                 testi celotnega toka

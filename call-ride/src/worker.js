@@ -1,4 +1,5 @@
-import { PLACES, PLACE_SET, PLACE_COORDS, MAIN_PLACES } from './places.js';
+import { PLACES, PLACE_SET, PLACE_COORDS, MAIN_PLACES, PLACE_COUNTRY, PLACE_KIND, COUNTRIES } from './places.js';
+import { detourOptions, stopBetween } from './route.js';
 import {
   policy, haversineKm, segmentPrice, routeKm, nowLocal, nowLocalMs, localToMs, msToLocal, ridePoints, suggestedPickupTime, refreshEta, delayMinutes, cancelTerms,
 } from './live.js';
@@ -203,7 +204,7 @@ function rideOut(r) {
   };
 }
 
-// Iskanje z zemljevida: točke koridorja v radiu od izbrane lokacije, najbližja prva.
+// Iskanje z zemljevida: postaje v radiu od izbrane lokacije, najbližja prva.
 function placesNear(q) {
   const lat = Number(q.get('lat'));
   const lng = Number(q.get('lng'));
@@ -336,7 +337,7 @@ async function myRequests(env, user) {
   return json({ requests });
 }
 
-// Odprta iskanja potnikov na koridorju; pri vsakem vožnje tega prevoznika, ki ga lahko peljejo.
+// Odprta iskanja potnikov; pri vsakem vožnje tega prevoznika, ki ga lahko peljejo.
 // ---------- predlog cene za prevoznika ----------
 
 // Utežen percentil: samples = [{ v, w }].
@@ -361,7 +362,6 @@ async function priceSuggestion(env, url) {
   const proposed = { origin, destination, stops: JSON.stringify(stops) };
   const route = ridePoints(proposed);
   const km = routeKm(route);
-  const dir = Math.sign(PLACES.indexOf(destination) - PLACES.indexOf(origin));
   const baseline = Number(env.PRICE_BASELINE_EUR_PER_KM) > 0 ? Number(env.PRICE_BASELINE_EUR_PER_KM) : 0.1;
   const since = msToLocal(nowLocalMs() - 180 * 86400000);
 
@@ -383,7 +383,8 @@ async function priceSuggestion(env, url) {
     const common = pts.filter((p) => mine.has(p)).length;
     // Podobnost poti (Jaccard); obratna smer šteje pol, ker je povpraševanje lahko drugačno.
     let sim = common / new Set([...pts, ...route]).size;
-    if (Math.sign(PLACES.indexOf(r.destination) - PLACES.indexOf(r.origin)) !== dir) sim /= 2;
+    const shared = pts.filter((p) => mine.has(p));
+    if (shared.length >= 2 && route.indexOf(shared[0]) > route.indexOf(shared[shared.length - 1])) sim /= 2;
     if (sim < 0.3) continue;
     const v = r.price_per_seat / 100 / routeKm(pts);
     if (r.sold > 0) sold.push({ v, w: sim * r.sold });
@@ -397,6 +398,8 @@ async function priceSuggestion(env, url) {
   const onLine = reqs.filter((x) => route.indexOf(x.origin) !== -1 && route.indexOf(x.origin) < route.indexOf(x.destination));
 
   return json({
+    route,
+    detours: detourOptions(route),
     km: Math.round(km),
     basis: enough ? 'data' : 'baseline',
     suggested: euro(perKm),
@@ -451,8 +454,7 @@ async function createRide(env, user, body) {
   if (origin === destination) fail(400, 'Začetek in cilj morata biti različna.');
   const stops = Array.isArray(body.stops) ? body.stops.map((s) => place(s, 'vmesna točka')) : [];
   if (new Set([origin, destination, ...stops]).size !== stops.length + 2) fail(400, 'Točke na poti se ne smejo ponavljati.');
-  const [lo, hi] = [PLACES.indexOf(origin), PLACES.indexOf(destination)].sort((x, y) => x - y);
-  if (stops.some((p) => PLACES.indexOf(p) < lo || PLACES.indexOf(p) > hi)) fail(400, 'Vmesne točke morajo biti med začetkom in ciljem.');
+  if (stops.some((p) => !stopBetween(origin, destination, p))) fail(400, 'Vmesne točke morajo biti med začetkom in ciljem.');
 
   const departure = str(body.departure_at, 'odhod', { max: 16 });
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(departure)) fail(400, 'Neveljaven čas odhoda.');
@@ -809,7 +811,7 @@ async function handleApi(request, env, url) {
   const user = await currentUser(env, request);
   let m;
 
-  if (path === '/places' && method === 'GET') return json({ places: PLACES, coords: PLACE_COORDS, main: [...MAIN_PLACES] });
+  if (path === '/places' && method === 'GET') return json({ places: PLACES, coords: PLACE_COORDS, main: [...MAIN_PLACES], country: PLACE_COUNTRY, kind: PLACE_KIND, countries: COUNTRIES });
 
   if (path === '/config' && method === 'GET') {
     // Ključ za Maps Embed API je javen (omejen na domeno v Google Cloud), ključ za Routes API ostane na strežniku.
