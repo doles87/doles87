@@ -86,7 +86,7 @@ export function ridePoints(ride) {
   return [ride.origin, ...middle, ride.destination];
 }
 
-function routeKm(points) {
+export function routeKm(points) {
   let km = 0;
   for (let i = 1; i < points.length; i++) km += haversineKm(PLACE_COORDS[points[i - 1]], PLACE_COORDS[points[i]]);
   return km;

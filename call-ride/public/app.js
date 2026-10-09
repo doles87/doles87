@@ -450,8 +450,9 @@ async function viewResults({ query }) {
 
   let rides;
   let near;
+  let offerRides = [];
   try {
-    ({ rides, near } = await api(`/rides/search?${query}`));
+    ({ rides, near, offer_rides: offerRides = [] } = await api(`/rides/search?${query}`));
   } catch (e) {
     render(html`${head}<main><div class="err">${e.message}</div></main>`, { tab: '#/' });
     return;
@@ -463,7 +464,7 @@ async function viewResults({ query }) {
 
   render(html`${head}<main>
     ${byMap && near ? html`<div class="small muted">${near.length ? html`Postaje v radiu: ${near.map((x, i) => html`${i ? ', ' : ''}<b style="color:var(--ink)">${x.place}</b> (${km(x.km)})`)}` : 'V izbranem radiu ni nobene postaje na koridorju.'}</div>` : ''}
-    ${rides.length ? html`<h2>${rides.length} ${word} na tvoji poti</h2>` : html`<div class="card empty">
+    ${rides.length ? html`<h2>${rides.length} ${word} na tvoji poti</h2>` : offerRides.length ? '' : html`<div class="card empty">
       <b>Za ta termin še ni prostih voženj.</b>
       <p class="small">Poskusi z daljšim časovnim oknom, drugim dnem ali večjim radijem — ali spodaj obvesti prevoznike, da iščeš prevoz.</p>
       <a class="btn ghost sm" href="#/">Spremeni iskanje</a>
@@ -491,9 +492,23 @@ async function viewResults({ query }) {
         ${r.private_total !== null ? html`<a class="private-offer" href="${link(r, 'private')}"><span>Zasebno · cel kombi, brez drugih potnikov</span><b>${eur(r.private_total)}</b></a>` : ''}
       </div></article>`;
     })}
+    ${offerRides.length ? html`<h2>Ponudi svojo ceno</h2>
+      <p class="small muted" style="margin-top:-6px">Te vožnje so dražje od €${q.max_total}. Pošlji ponudbo — prevoznik jo lahko sprejme ali zavrne.</p>
+      ${offerRides.map((r) => html`<article class="ride"><div class="in">
+        <div class="between">
+          <div><div class="name">${r.company_name}</div>
+            <div class="meta"><span>${city(r.pickup)} ~<b class="mono">${fmtTime(r.pickup_eta)}</b> · ${r.seats_left} prostih</span></div></div>
+          <div><div class="price" style="text-decoration:line-through;color:var(--faint);font-size:16px">${eur(r.offer_kind === 'private' ? r.private_total : r.shared_total)}</div>
+            <div class="price">${eur(r.offer_total)}</div></div>
+        </div>
+        <a class="btn ghost sm" style="margin-top:12px" href="#/voznja/${r.id}?${new URLSearchParams({ from: r.pickup, to: q.to, seats, kind: r.offer_kind, offer: q.max_total })}">Ponudi €${q.max_total}</a>
+      </div></article>`)}` : ''}
     ${reqFrom ? html`<form id="req" class="card stack">
       <div><b>Obvesti prevoznike, da iščeš prevoz</b>
-        <p class="small muted" style="margin:4px 0 0">${city(reqFrom)} → ${city(q.to)} · ${fmtDay(q.date)} · ${q.time_from || '00:00'}–${q.time_to || '23:59'} · ${persons(seats)}. Prevozniki na tej liniji vidijo tvoje ime in telefon, ti pa v »Rezervacije« vidiš, ko se pojavi ustrezna vožnja.</p></div>
+        <p class="small muted" style="margin:4px 0 0">${city(reqFrom)} → ${city(q.to)} · ${fmtDay(q.date)} · ${q.time_from || '00:00'}–${q.time_to || '23:59'} · ${persons(seats)}. Prevozniki na tej liniji vidijo tvoje ime, telefon in ceno, ki si jo pripravljen plačati, ti pa v »Rezervacije« vidiš, ko se pojavi ustrezna vožnja.</p></div>
+      <div class="row">
+        <div class="box"><label class="field"><span>Največ plačam skupaj (€)</span><input type="number" name="max_total" min="1" step="1" inputmode="decimal" class="mono" value="${q.max_total || ''}" placeholder="neobvezno"></label></div>
+      </div>
       <div class="box"><label class="field"><span>Opomba (neobvezno)</span><input name="note" maxlength="300" placeholder="npr. prtljaga, prožen termin"></label></div>
       <div class="err" hidden></div>
       <button class="btn ${rides.length ? 'ghost' : ''} sm" type="submit">Objavi iskanje</button>
@@ -508,7 +523,7 @@ async function viewResults({ query }) {
     submitting(reqForm, async () => {
       await api('/requests', {
         method: 'POST',
-        body: { origin: reqFrom, destination: q.to, date: q.date, time_from: q.time_from, time_to: q.time_to, seats, note: reqForm.note.value },
+        body: { origin: reqFrom, destination: q.to, date: q.date, time_from: q.time_from, time_to: q.time_to, seats, note: reqForm.note.value, max_total: reqForm.max_total.value },
       });
       toast('Iskanje objavljeno. Prevozniki ga vidijo.');
       go('#/moje');
@@ -560,6 +575,11 @@ async function viewRide({ params, query }) {
       ${ride.note ? html`<div class="notice teal">${svg(I.info, { size: 17 })}<div><b>Opomba prevoznika:</b> ${ride.note}</div></div>` : ''}
       <div class="notice" id="shared-note">${svg(I.alert, { size: 17, stroke: '#B9770E' })}<div><b>Deljena vožnja.</b> Prevoznik lahko na poti pobere še druge potnike, zato se prihod lahko podaljša${ride.max_detour_min ? ` (največ ~${ride.max_detour_min} min ovinka)` : ''}. Točen čas prevzema ti potrdi prevoznik.</div></div>
       ${ride.private_available ? html`<label class="check"><input type="checkbox" name="private" ${kind === 'private' ? raw('checked') : ''}><span><b>Raje zasebno</b> (${eur(ride.private_price)} za cel kombi) — direktno, brez pobiranja drugih potnikov.</span></label>` : ''}
+      <div class="card stack">
+        <label class="check" style="margin:0"><input type="checkbox" name="offer_on" ${query.get('offer') ? raw('checked') : ''}><span><b>Ponudi svojo ceno</b> — prevoznik jo sprejme ali zavrne.</span></label>
+        <div class="box" id="offer-box" hidden><label class="field"><span>Moja ponudba skupaj (€)</span><input type="number" name="offer_total" min="1" step="1" inputmode="decimal" class="mono" value="${query.get('offer') || ''}"></label></div>
+        <div class="small muted" id="offer-hint" hidden></div>
+      </div>
       <div class="box"><label class="field"><span>Številka leta (neobvezno — če prihajaš z letalom)</span><input name="flight_number" maxlength="12" placeholder="npr. FR1834" class="mono" autocapitalize="characters"></label></div>
       <div class="box"><label class="field"><span>Opomba za prevoznika (neobvezno)</span><textarea name="note" maxlength="500" placeholder="prtljaga, otroški sedež, točno mesto prevzema …"></textarea></label></div>
       <div class="err" hidden></div>
@@ -588,25 +608,45 @@ async function viewRide({ params, query }) {
     app.querySelector('#shared-note').hidden = kind === 'private';
     const invalid = a >= b;
     const noSeats = kind === 'shared' && seats > ride.seats_left;
+    // Ponudba: med 50 % cene (na cel evro navzgor) in ceno po ceniku.
+    const offerOn = form.offer_on.checked;
+    const minOffer = Math.ceil((total * (state.config.offer_min_percent || 50)) / 10000) * 100;
+    const offer = Math.round(Number(form.offer_total.value) * 100);
+    app.querySelector('#offer-box').hidden = !offerOn;
+    const hint = app.querySelector('#offer-hint');
+    hint.hidden = !offerOn;
+    hint.textContent = `Cena po ceniku ${eur(total)}. Ponudiš lahko od ${eur(minOffer)} naprej.`;
+    const offerBad = offerOn && (!offer || offer < minOffer || offer >= total);
+    if (offerOn && offer && offer < total) {
+      app.querySelector('#total').innerHTML = piece(html`<s style="color:var(--faint);font-size:15px">${eur(total)}</s> ${eur(offer)}`);
+      app.querySelector('#calc').textContent = 'Tvoja ponudba';
+    }
     const btn = app.querySelector('#book-btn');
-    btn.disabled = invalid || noSeats;
-    btn.textContent = invalid ? 'Izstop mora biti za prevzemom' : noSeats ? `Prostih je le ${seatsWord(ride.seats_left)}` : state.me ? `Rezerviraj · ${eur(total)}` : 'Prijavi se in rezerviraj';
+    btn.disabled = invalid || noSeats || offerBad;
+    btn.textContent = invalid ? 'Izstop mora biti za prevzemom' : noSeats ? `Prostih je le ${seatsWord(ride.seats_left)}`
+      : offerBad ? (offer >= total ? 'Ponudba mora biti nižja od cene' : `Ponudba najmanj ${eur(minOffer)}`)
+        : !state.me ? 'Prijavi se in rezerviraj'
+          : offerOn ? `Pošlji ponudbo · ${eur(offer)}` : `Rezerviraj · ${eur(total)}`;
   }
   form.addEventListener('change', update);
+  form.offer_total.addEventListener('input', update);
   update();
   form.addEventListener('submit', (e) => {
     e.preventDefault();
     if (!state.me) {
-      go(`#/prijava?next=${encodeURIComponent(`#/voznja/${ride.id}?${new URLSearchParams({ from: pickup, to: dropoff, seats, kind })}`)}`);
+      go(`#/prijava?next=${encodeURIComponent(`#/voznja/${ride.id}?${new URLSearchParams({ from: pickup, to: dropoff, seats, kind, ...(form.offer_on.checked ? { offer: form.offer_total.value } : {}) })}`)}`);
       return;
     }
     if (state.me.role === 'carrier') { toast('Kot prevoznik ne moreš rezervirati. Ustvari ločen potniški račun.'); return; }
     submitting(form, async () => {
       await api('/bookings', {
         method: 'POST',
-        body: { ride_id: ride.id, pickup, dropoff, seats, kind, flight_number: form.flight_number.value, note: form.note.value },
+        body: {
+          ride_id: ride.id, pickup, dropoff, seats, kind, flight_number: form.flight_number.value, note: form.note.value,
+          offer_total: form.offer_on.checked ? form.offer_total.value : undefined,
+        },
       });
-      toast('Rezervacija oddana! Prevoznik jo bo potrdil.');
+      toast(form.offer_on.checked ? 'Ponudba poslana! Prevoznik jo bo sprejel ali zavrnil.' : 'Rezervacija oddana! Prevoznik jo bo potrdil.');
       go('#/moje');
     });
   });
@@ -654,7 +694,7 @@ async function viewMyBookings() {
   const head = html`<header class="top"><div class="grow"><div class="title" style="font-size:19px;font-weight:700">Moje rezervacije</div></div></header>`;
   render(html`${head}<main><p class="muted">Nalagam …</p></main>`, { tab: '#/moje' });
   const [{ bookings }, { requests }] = await Promise.all([api('/bookings/mine'), api('/requests/mine')]);
-  const searchLink = (r) => `#/iskanje?${new URLSearchParams({ from: r.origin, to: r.destination, date: r.date, seats: r.seats, time_from: r.time_from, time_to: r.time_to })}`;
+  const searchLink = (r) => `#/iskanje?${new URLSearchParams({ from: r.origin, to: r.destination, date: r.date, seats: r.seats, time_from: r.time_from, time_to: r.time_to, ...(r.max_total ? { max_total: r.max_total / 100 } : {}) })}`;
   const upcoming = bookings.filter((b) => ['pending', 'confirmed'].includes(b.status) && isFuture(b.departure_at));
   const pending = upcoming.filter((b) => b.status === 'pending').length;
 
@@ -663,7 +703,7 @@ async function viewMyBookings() {
     ${requests.length ? html`<h2>Moja iskanja</h2>${requests.map((r) => html`<article class="card">
       <div class="between"><div style="font-size:16px;font-weight:700">${city(r.origin)} → ${city(r.destination)}</div>
         ${r.matches ? html`<span class="pill ok">${r.matches} ${r.matches === 1 ? 'vožnja' : r.matches === 2 ? 'vožnji' : r.matches <= 4 ? 'vožnje' : 'voženj'}</span>` : html`<span class="pill wait">čakam</span>`}</div>
-      <div class="mono small muted" style="margin-top:5px">${fmtDay(r.date)} · ${r.time_from}–${r.time_to} · ${persons(r.seats)}</div>
+      <div class="mono small muted" style="margin-top:5px">${fmtDay(r.date)} · ${r.time_from}–${r.time_to} · ${persons(r.seats)}${r.max_total ? ` · do ${eur(r.max_total)}` : ''}</div>
       ${r.note ? html`<div class="small" style="margin-top:4px">„${r.note}“</div>` : ''}
       <p class="small muted" style="margin:6px 0 0">${r.matches ? 'Na tvoji liniji je prosta vožnja — rezerviraj jo.' : 'Prevozniki na tej liniji vidijo tvoje iskanje in te lahko pokličejo.'}</p>
       <div class="btns" style="margin-top:10px">
@@ -680,6 +720,9 @@ async function viewMyBookings() {
       <div class="small muted" style="margin-top:4px">${b.pickup} → ${b.dropoff} · ${b.kind === 'private' ? 'cel kombi' : persons(b.seats)}</div>
       ${b.flight_number ? html`<div class="small muted">Let <b class="mono" style="color:var(--ink)">${b.flight_number}</b></div>` : ''}
       ${b.status === 'confirmed' && b.pickup_time ? html`<div class="small" style="margin-top:4px">Dogovorjen prevzem ob <b class="mono">${fmtTime(b.pickup_time)}</b>${b.pickup_time.slice(0, 10) !== b.departure_at.slice(0, 10) ? ` (${fmtDay(b.pickup_time)})` : ''}</div>` : ''}
+      ${b.list_total ? html`<div class="small" style="margin-top:4px">${b.status === 'pending' ? html`Tvoja ponudba <b class="mono">${eur(b.total)}</b> (cenik ${eur(b.list_total)}) — čaka, da jo prevoznik sprejme.`
+        : ['confirmed', 'completed'].includes(b.status) ? html`<span style="color:var(--green)">Prevoznik je sprejel tvojo ceno ${eur(b.total)}</span> (cenik ${eur(b.list_total)}).`
+          : b.status === 'rejected' ? html`Prevoznik ponudbe ${eur(b.total)} ni sprejel. <a href="#/voznja/${b.ride_id}?${new URLSearchParams({ from: b.pickup, to: b.dropoff, seats: b.seats, kind: b.kind })}">Rezerviraj po ceniku</a>` : ''}</div>` : ''}
       ${b.cancel_fee ? html`<div class="small" style="margin-top:4px;color:var(--red)">Pristojbina ${eur(b.cancel_fee)} · ${b.cancel_reason || ''}</div>` : b.cancel_reason && b.status === 'cancelled' ? html`<div class="small muted" style="margin-top:4px">${b.cancel_reason}</div>` : ''}
       ${b.status === 'confirmed' && b.started_at && b.ride_status === 'open' ? html`<div data-live="${b.id}" style="margin-top:10px"><p class="small muted">Nalagam sledenje …</p></div>` : ''}
       ${b.carrier_phone ? html`<a class="btn ghost sm" style="margin-top:10px" href="tel:${b.carrier_phone}">${svg(I.phone, { size: 16 })} Pokliči prevoznika · ${b.carrier_phone}</a>` : ''}
@@ -972,10 +1015,11 @@ async function viewCarrier() {
             ${['confirmed', 'completed'].includes(b.status) && b.passenger_phone ? html`<a class="small" href="tel:${b.passenger_phone}">${b.passenger_phone}</a>` : ''}
             ${b.rating ? html`<div class="stars">${[1, 2, 3, 4, 5].map((n) => star(n <= b.rating, 13))}</div>` : ''}
           </div>
-          <span class="mono" style="font-weight:700">${eur(b.total)}</span>
+          <span style="text-align:right">${b.list_total ? html`<s class="mono small" style="color:var(--faint)">${eur(b.list_total)}</s><br>` : ''}<span class="mono" style="font-weight:700">${eur(b.total)}</span></span>
         </div>
+        ${b.list_total && b.status === 'pending' ? html`<div class="notice small" style="margin-top:8px">${svg(I.info, { size: 16, stroke: '#B9770E' })}<div><b>Ponudba potnika: ${eur(b.total)}</b> namesto ${eur(b.list_total)}. S potrditvijo ceno sprejmeš.</div></div>` : ''}
         ${r.status === 'open' && b.status === 'pending' ? html`<div class="btns" style="margin-top:10px">
-          <button class="btn sm" data-b="${b.id}" data-act="confirm" data-name="${b.passenger_name}" data-pickup="${b.pickup}" data-suggested="${b.suggested_pickup_time || ''}" data-departure="${r.departure_at}">Potrdi</button>
+          <button class="btn sm" data-b="${b.id}" data-act="confirm" data-name="${b.passenger_name}" data-pickup="${b.pickup}" data-suggested="${b.suggested_pickup_time || ''}" data-departure="${r.departure_at}" data-offer="${b.list_total ? eur(b.total) : ''}">${b.list_total ? `Sprejmi ${eur(b.total)}` : 'Potrdi'}</button>
           <button class="btn ghost sm" data-b="${b.id}" data-act="reject">Zavrni</button></div>` : ''}
         ${r.status === 'open' && b.status === 'confirmed' && r.started_at && !b.picked_up_at ? html`<div class="btns" style="margin-top:8px">
           <button class="btn teal sm" data-b="${b.id}" data-act="picked_up">Pobran</button>
@@ -1008,6 +1052,7 @@ async function viewCarrier() {
           <div class="between"><div><b>${q.passenger_name}</b> · ${persons(q.seats)}
             <div style="font-size:15px;font-weight:700;margin-top:3px">${city(q.origin)} → ${city(q.destination)}</div>
             <div class="mono small muted">${fmtDay(q.date)} · ${q.time_from}–${q.time_to}</div>
+            ${q.max_total ? html`<div class="small" style="margin-top:2px">Pripravljen plačati do <b class="mono">${eur(q.max_total)}</b> skupaj</div>` : ''}
             <div class="small muted">${q.origin} → ${q.destination}</div>
             ${q.note ? html`<div class="small" style="margin-top:3px">„${q.note}“</div>` : ''}</div>
             ${mine.length ? html`<span class="pill ok">na tvoji poti</span>` : ''}</div>
@@ -1038,12 +1083,12 @@ const CARRIER_DONE = {
 };
 
 // Obrazec ob potrditvi rezervacije: čas prevzema s predlogom sistema. Vrne "HH:MM" ali null ob preklicu.
-function askPickupTime({ name, pickup, suggested, departure }) {
+function askPickupTime({ name, pickup, suggested, departure, offer }) {
   const value = suggested ? fmtTime(suggested) : fmtTime(departure);
   const dlg = document.createElement('dialog');
   dlg.innerHTML = piece(html`<form method="dialog">
     <div class="between"><b>Potrdi rezervacijo</b><button class="icon-btn" value="close" aria-label="Zapri" formnovalidate>✕</button></div>
-    <div><b>${name}</b><div class="small muted">Prevzem: ${pickup}</div></div>
+    <div><b>${name}</b><div class="small muted">Prevzem: ${pickup}</div>${offer ? html`<div class="small" style="margin-top:4px">Sprejmeš ponudbo <b>${offer}</b>.</div>` : ''}</div>
     <div class="box"><label class="field"><span>Dogovorjen čas prevzema</span><input type="time" name="time" value="${value}" required class="mono" style="font-size:20px"></label></div>
     <p class="small muted" style="margin:0">Odhod vožnje ob <b class="mono">${fmtTime(departure)}</b>${suggested ? html` · predlog po oceni poti: <button type="button" class="link-btn mono" data-reset>${fmtTime(suggested)}</button>` : ''}<br>
       Potnik vidi ta čas, po njem se računata zamuda in neprihod.</p>
@@ -1113,6 +1158,7 @@ async function viewNewRide({ query }) {
         <div class="box"><label class="field"><span>Prosti sedeži</span><input type="number" name="seats_total" min="1" max="60" value="8" inputmode="numeric" required class="mono"></label></div>
         <div class="box"><label class="field"><span>Cena na sedež (€)</span><input type="number" name="price_per_seat" min="0" step="1" value="22" inputmode="decimal" required class="mono"></label></div>
       </div>
+      <div id="price-tip"></div>
       <div class="box"><label class="field"><span>Največji ovinek za pobiranje (min)</span><input type="number" name="max_detour_min" min="0" max="180" value="20" inputmode="numeric" class="mono"></label></div>
       <div class="card stack">
         <label class="between" style="align-items:center;cursor:pointer"><span><b style="font-size:14px">Dovoli zasebni najem</b><br><span class="small muted">cel kombi za eno skupino · ceno določiš sam</span></span>
@@ -1150,7 +1196,42 @@ async function viewNewRide({ query }) {
       drawStops();
     }));
     drawRequests();
+    drawPrice();
     return between;
+  }
+  // Predlog cene iz prodaje na podobnih poteh; osveži se ob spremembi poti.
+  let priceTimer;
+  let priceSeq = 0;
+  function drawPrice() {
+    clearTimeout(priceTimer);
+    priceTimer = setTimeout(async () => {
+      const seq = ++priceSeq;
+      const params = new URLSearchParams({ origin: form.origin.value, destination: form.destination.value });
+      selected.forEach((p) => params.append('stop', p));
+      const box = app.querySelector('#price-tip');
+      if (!box) return;
+      let t;
+      try { t = await api(`/carrier/price-suggestion?${params}`); } catch { box.innerHTML = ''; return; }
+      if (seq !== priceSeq) return;
+      box.innerHTML = piece(html`<div class="card stack price-tip">
+        <div class="between" style="align-items:center">
+          <div><div class="small muted">Predlagana cena na sedež · ${t.km} km</div>
+            <div class="mono" style="font-size:24px;font-weight:700">${eur(t.suggested * 100)}</div></div>
+          <button type="button" class="btn teal sm" style="width:auto;padding:0 16px" data-use-price="${t.suggested}">Uporabi</button>
+        </div>
+        ${t.basis === 'data'
+          ? html`<div class="small">Na podobnih poteh se je največ sedežev prodalo po <b>${eur(t.range[0] * 100)}–${eur(t.range[1] * 100)}</b> (${t.seats_sold} ${t.seats_sold === 1 ? 'sedež' : 'sedežev'} na ${t.rides_with_sales} ${t.rides_with_sales === 1 ? 'vožnji' : 'vožnjah'}).</div>`
+          : html`<div class="small muted">Začetna ocena (${eur(Math.round(t.suggested / t.km * 100))}/km) — na tej liniji je prodanih še premalo sedežev. Predlog se bo izboljševal z vsako prodano vožnjo.</div>`}
+        ${t.full_rides_price ? html`<div class="small">${svg(I.van, { size: 14 })} Vožnje, ki so se zapolnile vsaj 75 %, so stale povprečno <b>${eur(t.full_rides_price * 100)}</b>.</div>` : ''}
+        ${t.unsold_rides_price ? html`<div class="small" style="color:var(--red)">Vožnje brez potnikov so stale povprečno ${eur(t.unsold_rides_price * 100)} — ta cena potnikov ni privabila.</div>` : ''}
+        ${t.open_requests ? html`<div class="small">${svg(I.user, { size: 14 })} Na tej liniji trenutno išče prevoz <b>${t.open_requests}</b> ${t.open_requests === 1 ? 'potnik' : 'potnikov'} (${seatsWord(t.open_request_seats)}).</div>` : ''}
+        <div class="small muted">Potniki na delu poti plačajo sorazmerni del cene.</div>
+      </div>`);
+      box.querySelector('[data-use-price]').addEventListener('click', () => {
+        form.price_per_seat.value = t.suggested;
+        toast(`Cena nastavljena na ${eur(t.suggested * 100)} na sedež.`);
+      });
+    }, 250);
   }
   // Iskanja potnikov, ki jih ta vožnja (po trenutni izbiri) lahko pelje na izbrani dan.
   function drawRequests() {

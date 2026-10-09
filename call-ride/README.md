@@ -12,7 +12,8 @@ Tehnologija: en Cloudflare Worker (API + statične datoteke), baza Cloudflare D1
 - **iskanje na zemljevidu**: tapni točko (ali »Uporabi mojo lokacijo«), izberi radij 1–50 km — najde vožnje, ki ustavijo na kateri od postaj v radiu
 - časovno okno se primerja z **ocenjenim časom prevzema na potnikovi točki** (vožnja iz Milana ob 7:00 je v Trstu okoli 12:00)
 - **cena odseka**: potnik plača sorazmerni del cene glede na dolžino svojega odseka (zaokroženo na cel evro, najmanj 5 €)
-- **objava iskanja**: če ni ustrezne vožnje, potnik objavi, da išče prevoz; v »Rezervacije« vidi, ko se pojavi ustrezna vožnja
+- **objava iskanja**: če ni ustrezne vožnje, potnik objavi, da išče prevoz (lahko tudi z največjo ceno); v »Rezervacije« vidi, ko se pojavi ustrezna vožnja
+- **ponudba cene**: potnik pri rezervaciji ponudi nižjo ceno (najmanj 50 % cene po ceniku); pri iskanju z »Največ plačam« so dražje vožnje prikazane v razdelku »Ponudi svojo ceno«. Prevoznik ponudbo sprejme s potrditvijo ali jo zavrne
 - rezervacija deljene vožnje ali zasebnega najema celega kombija, številka leta, opomba
 - moje rezervacije: status, dogovorjen čas prevzema, telefon prevoznika po potrditvi, ocena po vožnji
 - **sledenje vozniku v živo**: ko voznik začne vožnjo, potnik vidi predviden prihod na svoj prevzem, zamudo glede na dogovorjen čas in zemljevid; osveževanje vsakih 30 s
@@ -22,7 +23,8 @@ Tehnologija: en Cloudflare Worker (API + statične datoteke), baza Cloudflare D1
 - registracija s podatki za preverbo (matična, davčna, vrsta in številka licence, licenca Skupnosti, veljavnost, vozilo)
 - objava vožnje: kraji ob glavni poti (npr. Milano → Ljubljana: Bergamo, Brescia, Verona, Vicenza, Padova, Mestre, Benetke, Trst, Koper, Sežana, Postojna …) so na poti **samodejno**; ovinke (letališča, središča mest) doda sam
 - **potniki iščejo prevoz**: seznam iskanj na koridorju z oznako »na tvoji poti«, telefon potnika, gumb »Objavi vožnjo« s predizpolnjenim obrazcem; obrazec za novo vožnjo sproti pokaže potnike na izbrani liniji in dan
-- potrditev rezervacije z obrazcem: dogovorjen čas prevzema, vnaprej izpolnjen s predlogom po oceni poti
+- potrditev rezervacije z obrazcem: dogovorjen čas prevzema, vnaprej izpolnjen s predlogom po oceni poti; pri ponudbi potnika gumb »Sprejmi €X«
+- **predlog cene** pri objavi vožnje: cena na km, po kateri se je na podobnih poteh prodalo največ sedežev (utežena mediana, razpon 25.–75. percentil), povprečje voženj z ≥ 75 % zasedenostjo, opozorilo na ceno voženj brez potnikov in število potnikov, ki iščejo prevoz na liniji. Dokler na podobnih poteh nista prodana vsaj 3 sedeži, je predlog začetna ocena `PRICE_BASELINE_EUR_PER_KM` (0,10 €/km)
 - cena na sedež velja za celo pot, zasebni najem, največji ovinek
 - potrjevanje/zavračanje rezervacij
 - **način vožnje v teku**: deli GPS lokacijo iz brskalnika, zaslon ostane prižgan, potniki po vrstnem redu prevzema, gumba Pobran / Ni prišel, navigacija z Google Maps

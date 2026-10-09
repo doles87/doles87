@@ -1,6 +1,6 @@
 import { PLACES, PLACE_SET, PLACE_COORDS, MAIN_PLACES } from './places.js';
 import {
-  policy, haversineKm, segmentPrice, nowLocal, nowLocalMs, localToMs, msToLocal, ridePoints, suggestedPickupTime, refreshEta, delayMinutes, cancelTerms,
+  policy, haversineKm, segmentPrice, routeKm, nowLocal, nowLocalMs, localToMs, msToLocal, ridePoints, suggestedPickupTime, refreshEta, delayMinutes, cancelTerms,
 } from './live.js';
 
 const SESSION_COOKIE = 'pv_session';
@@ -267,7 +267,8 @@ async function searchRides(env, url) {
   const near = q.has('lat') ? placesNear(q) : null;
   const date = q.get('date') || '';
   if (!DATE_RE.test(date)) fail(400, 'Izberi datum.');
-  const rides = await findRides(env, {
+  const maxTotal = q.get('max_total') ? euroToCents(q.get('max_total'), 'največja cena') : null;
+  const all = await findRides(env, {
     near,
     from: near ? null : place(q.get('from'), 'od'),
     to: place(q.get('to'), 'do'),
@@ -275,9 +276,14 @@ async function searchRides(env, url) {
     seats: int(q.get('seats') || 1, 'potniki', 1, 60),
     timeFrom: TIME_RE.test(q.get('time_from') || '') ? q.get('time_from') : '00:00',
     timeTo: TIME_RE.test(q.get('time_to') || '') ? q.get('time_to') : '23:59',
-    maxTotal: q.get('max_total') ? euroToCents(q.get('max_total'), 'največja cena') : null,
   });
-  return json({ rides, near: near && near.map((x) => ({ place: x.place, km: Math.round(x.km * 10) / 10 })) });
+  // Vožnje nad potnikovo ceno: če je njegova cena vsaj najnižja dovoljena ponudba, lahko ponudi svojo ceno.
+  const cheapest = (r) => Math.min(r.shared_total ?? Infinity, r.private_total ?? Infinity);
+  const rides = maxTotal === null ? all : all.filter((r) => cheapest(r) <= maxTotal);
+  const offerRides = maxTotal === null ? [] : all
+    .filter((r) => cheapest(r) > maxTotal && maxTotal >= minOffer(env, cheapest(r)))
+    .map((r) => ({ ...r, offer_total: maxTotal, offer_kind: r.shared_total !== null && r.shared_total === cheapest(r) ? 'shared' : 'private' }));
+  return json({ rides, offer_rides: offerRides, near: near && near.map((x) => ({ place: x.place, km: Math.round(x.km * 10) / 10 })) });
 }
 
 // Cene sedeža za vse odseke vožnje (ključ "i-j" po indeksih v route), za izračun na strani rezervacije.
@@ -293,7 +299,7 @@ function segmentPrices(r) {
 function requestOut(q) {
   return {
     id: q.id, origin: q.origin, destination: q.destination, date: q.date, time_from: q.time_from, time_to: q.time_to,
-    seats: q.seats, note: q.note, status: q.status, created_at: q.created_at,
+    seats: q.seats, note: q.note, status: q.status, created_at: q.created_at, max_total: q.max_total,
   };
 }
 
@@ -308,12 +314,13 @@ async function createRequest(env, user, body) {
   if (timeFrom > timeTo) fail(400, 'Časovno okno ni veljavno.');
   const seats = int(body.seats ?? 1, 'potniki', 1, 60);
   const note = str(body.note, 'opomba', { required: false, max: 300 });
+  const maxTotal = body.max_total !== undefined && body.max_total !== null && body.max_total !== '' ? euroToCents(body.max_total, 'največja cena') : null;
   const open = await env.DB.prepare(`SELECT COUNT(*) AS n FROM ride_requests WHERE passenger_id = ? AND status = 'open' AND date >= ?`)
     .bind(user.id, nowLocal().slice(0, 10)).first();
   if (open.n >= 10) fail(400, 'Imaš že 10 odprtih iskanj. Zapri katero od njih.');
   const res = await env.DB.prepare(
-    `INSERT INTO ride_requests (passenger_id, origin, destination, date, time_from, time_to, seats, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).bind(user.id, origin, destination, date, timeFrom, timeTo, seats, note).run();
+    `INSERT INTO ride_requests (passenger_id, origin, destination, date, time_from, time_to, seats, note, max_total) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(user.id, origin, destination, date, timeFrom, timeTo, seats, note, maxTotal).run();
   return json({ id: res.meta.last_row_id }, 201);
 }
 
@@ -330,6 +337,81 @@ async function myRequests(env, user) {
 }
 
 // Odprta iskanja potnikov na koridorju; pri vsakem vožnje tega prevoznika, ki ga lahko peljejo.
+// ---------- predlog cene za prevoznika ----------
+
+// Utežen percentil: samples = [{ v, w }].
+function weightedPercentile(samples, q) {
+  const sorted = [...samples].sort((a, b) => a.v - b.v);
+  const total = sorted.reduce((s, x) => s + x.w, 0);
+  let acc = 0;
+  for (const x of sorted) { acc += x.w; if (acc >= total * q) return x.v; }
+  return sorted[sorted.length - 1].v;
+}
+const avg = (samples) => samples.reduce((s, x) => s + x.v * x.w, 0) / samples.reduce((s, x) => s + x.w, 0);
+
+// Predlog cene sedeža za novo vožnjo iz prodaje na podobnih poteh (zadnjih 180 dni in prihajajoče).
+// Cene primerjamo na kilometer, da se podatki prenesejo med različno dolgimi potmi; vsaka vožnja šteje
+// toliko, kolikor sedežev je prodala, in toliko bolj, kolikor je njena pot podobna novi.
+async function priceSuggestion(env, url) {
+  const q = url.searchParams;
+  const origin = place(q.get('origin'), 'od');
+  const destination = place(q.get('destination'), 'do');
+  if (origin === destination) fail(400, 'Začetek in cilj morata biti različna.');
+  const stops = q.getAll('stop').filter((x) => PLACE_SET.has(x));
+  const proposed = { origin, destination, stops: JSON.stringify(stops) };
+  const route = ridePoints(proposed);
+  const km = routeKm(route);
+  const dir = Math.sign(PLACES.indexOf(destination) - PLACES.indexOf(origin));
+  const baseline = Number(env.PRICE_BASELINE_EUR_PER_KM) > 0 ? Number(env.PRICE_BASELINE_EUR_PER_KM) : 0.1;
+  const since = msToLocal(nowLocalMs() - 180 * 86400000);
+
+  const [{ results: rides }, { results: reqs }] = await env.DB.batch([
+    env.DB.prepare(
+      `SELECT r.id, r.origin, r.destination, r.stops, r.price_per_seat, r.seats_total, r.status, r.departure_at,
+         COALESCE((SELECT SUM(b.seats) FROM bookings b WHERE b.ride_id = r.id AND b.status IN ${ACTIVE_BOOKING}), 0) AS sold
+       FROM rides r WHERE r.status IN ('open', 'completed') AND r.departure_at >= ? ORDER BY r.departure_at DESC LIMIT 500`,
+    ).bind(since),
+    env.DB.prepare(`SELECT origin, destination, seats FROM ride_requests WHERE status = 'open' AND date >= ?`).bind(nowLocal().slice(0, 10)),
+  ]);
+
+  const mine = new Set(route);
+  const sold = [];
+  const full = [];
+  const unsold = [];
+  for (const r of rides) {
+    const pts = ridePoints(r);
+    const common = pts.filter((p) => mine.has(p)).length;
+    // Podobnost poti (Jaccard); obratna smer šteje pol, ker je povpraševanje lahko drugačno.
+    let sim = common / new Set([...pts, ...route]).size;
+    if (Math.sign(PLACES.indexOf(r.destination) - PLACES.indexOf(r.origin)) !== dir) sim /= 2;
+    if (sim < 0.3) continue;
+    const v = r.price_per_seat / 100 / routeKm(pts);
+    if (r.sold > 0) sold.push({ v, w: sim * r.sold });
+    if (r.sold / r.seats_total >= 0.75) full.push({ v, w: sim });
+    if (r.sold === 0 && (r.status === 'completed' || r.departure_at <= nowLocal())) unsold.push({ v, w: sim });
+  }
+  const seatsSold = sold.reduce((s, x) => s + x.w, 0);
+  const enough = seatsSold >= 3;
+  const perKm = enough ? weightedPercentile(sold, 0.5) : baseline;
+  const euro = (ppk) => Math.max(5, Math.round(ppk * km));
+  const onLine = reqs.filter((x) => route.indexOf(x.origin) !== -1 && route.indexOf(x.origin) < route.indexOf(x.destination));
+
+  return json({
+    km: Math.round(km),
+    basis: enough ? 'data' : 'baseline',
+    suggested: euro(perKm),
+    range: enough ? [euro(weightedPercentile(sold, 0.25)), euro(weightedPercentile(sold, 0.75))] : null,
+    seats_sold: Math.round(seatsSold),
+    rides_with_sales: sold.length,
+    full_rides: full.length,
+    full_rides_price: full.length ? euro(avg(full)) : null,
+    unsold_rides: unsold.length,
+    unsold_rides_price: unsold.length ? euro(avg(unsold)) : null,
+    open_requests: onLine.length,
+    open_request_seats: onLine.reduce((s, x) => s + x.seats, 0),
+  });
+}
+
 async function carrierRequests(env, user) {
   const carrier = await env.DB.prepare('SELECT status FROM carriers WHERE user_id = ?').bind(user.id).first();
   if (carrier?.status !== 'approved') return json({ requests: [] });
@@ -446,6 +528,13 @@ async function completeRide(env, user, id) {
 
 // ---------- rezervacije ----------
 
+// Najnižja ponudba, ki jo potnik lahko pošlje: OFFER_MIN_PERCENT % cene po ceniku (privzeto 50 %), na cel evro.
+function minOffer(env, total) {
+  const pct = Number(env.OFFER_MIN_PERCENT) > 0 ? Number(env.OFFER_MIN_PERCENT) : 50;
+  return Math.ceil((total * pct) / 100 / 100) * 100;
+}
+const eurText = (cents) => `${(cents / 100).toFixed(cents % 100 ? 2 : 0).replace('.', ',')} €`;
+
 async function createBooking(env, user, body) {
   const rideId = int(body.ride_id, 'vožnja', 1, Number.MAX_SAFE_INTEGER);
   const ride = await getRide(env, rideId);
@@ -473,15 +562,27 @@ async function createBooking(env, user, body) {
   const flight = str(body.flight_number, 'številka leta', { required: false, max: 12 });
   const note = str(body.note, 'opomba', { required: false, max: 500 });
 
+  // Ponudba nižje cene: rezervacija čaka, da prevoznik ceno sprejme (ob potrditvi) ali zavrne.
+  let listTotal = null;
+  if (body.offer_total !== undefined && body.offer_total !== null && body.offer_total !== '') {
+    const offer = euroToCents(body.offer_total, 'ponudba');
+    const min = minOffer(env, total);
+    if (offer < total) {
+      if (offer < min) fail(400, `Ponudba je prenizka — najmanj ${eurText(min)}.`);
+      listTotal = total;
+      total = offer;
+    }
+  }
+
   // Preverba prostih sedežev in vnos v enem stavku, da se dve hkratni rezervaciji ne prekrijeta.
   const capacityBinds = kind === 'private' ? [rideId] : [rideId, rideId];
   const res = await env.DB.prepare(
-    `INSERT INTO bookings (ride_id, passenger_id, pickup, dropoff, seats, kind, total, flight_number, note)
-     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+    `INSERT INTO bookings (ride_id, passenger_id, pickup, dropoff, seats, kind, total, list_total, flight_number, note)
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
      WHERE (SELECT status FROM rides WHERE id = ?) = 'open' AND ${capacityCheck}`,
-  ).bind(rideId, user.id, pickup, dropoff, seats, kind, total, flight, note, rideId, ...capacityBinds).run();
+  ).bind(rideId, user.id, pickup, dropoff, seats, kind, total, listTotal, flight, note, rideId, ...capacityBinds).run();
   if (!res.meta.changes) fail(409, 'Žal ni več dovolj prostih sedežev.');
-  return json({ id: res.meta.last_row_id, total }, 201);
+  return json({ id: res.meta.last_row_id, total, list_total: listTotal }, 201);
 }
 
 async function myBookings(env, user) {
@@ -712,7 +813,10 @@ async function handleApi(request, env, url) {
 
   if (path === '/config' && method === 'GET') {
     // Ključ za Maps Embed API je javen (omejen na domeno v Google Cloud), ključ za Routes API ostane na strežniku.
-    return json({ policy: policy(env), maps_embed_key: env.GOOGLE_MAPS_EMBED_KEY || null, live_traffic: !!env.GOOGLE_MAPS_API_KEY });
+    return json({
+      policy: policy(env), maps_embed_key: env.GOOGLE_MAPS_EMBED_KEY || null, live_traffic: !!env.GOOGLE_MAPS_API_KEY,
+      offer_min_percent: Number(env.OFFER_MIN_PERCENT) > 0 ? Number(env.OFFER_MIN_PERCENT) : 50,
+    });
   }
 
   if (path === '/auth/register' && method === 'POST') {
@@ -857,6 +961,11 @@ async function handleApi(request, env, url) {
     const res = await env.DB.prepare(`UPDATE ride_requests SET status = 'closed' WHERE id = ? AND passenger_id = ?`).bind(Number(m[1]), user.id).run();
     if (!res.meta.changes) fail(404, 'Iskanje ne obstaja.');
     return json({ ok: true });
+  }
+
+  if (path === '/carrier/price-suggestion' && method === 'GET') {
+    requireRole(user, 'carrier', 'admin');
+    return priceSuggestion(env, url);
   }
 
   if (path === '/carrier/requests' && method === 'GET') {

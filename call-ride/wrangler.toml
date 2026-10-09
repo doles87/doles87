@@ -25,6 +25,10 @@ FREE_CANCEL_GRACE_MIN = "10"
 FREE_CANCEL_HOURS = "2"
 LATE_THRESHOLD_MIN = "15"
 NO_SHOW_WAIT_MIN = "5"
+# Začetna cena sedeža na km, dokler na podobnih poteh niso prodani vsaj 3 sedeži (predlog cene za prevoznike).
+PRICE_BASELINE_EUR_PER_KM = "0.10"
+# Najnižja ponudba potnika v % cene po ceniku (nižjih ponudb ni mogoče poslati).
+OFFER_MIN_PERCENT = "50"
 
 # Google Maps (neobvezno; brez ključev aplikacija uporablja oceno brez prometa in povezavo na Google Maps):
 #   npx wrangler secret put GOOGLE_MAPS_API_KEY    -> Routes API, prihod s prometom v živo (strežniški ključ)
