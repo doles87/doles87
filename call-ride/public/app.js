@@ -764,7 +764,7 @@ async function viewCarrier() {
           <span class="mono" style="font-weight:700">${eur(b.total)}</span>
         </div>
         ${r.status === 'open' && b.status === 'pending' ? html`<div class="btns" style="margin-top:10px">
-          <button class="btn sm" data-b="${b.id}" data-act="confirm">Potrdi</button>
+          <button class="btn sm" data-b="${b.id}" data-act="confirm" data-name="${b.passenger_name}" data-pickup="${b.pickup}" data-suggested="${b.suggested_pickup_time || ''}" data-departure="${r.departure_at}">Potrdi</button>
           <button class="btn ghost sm" data-b="${b.id}" data-act="reject">Zavrni</button></div>` : ''}
         ${r.status === 'open' && b.status === 'confirmed' && r.started_at && !b.picked_up_at ? html`<div class="btns" style="margin-top:8px">
           <button class="btn teal sm" data-b="${b.id}" data-act="picked_up">Pobran</button>
@@ -808,14 +808,41 @@ const CARRIER_DONE = {
   cancel: 'Vožnja odpovedana.', no_show: 'Neprihod zabeležen.', picked_up: 'Potnik pobran.', start: 'Vožnja se je začela.',
 };
 
+// Obrazec ob potrditvi rezervacije: čas prevzema s predlogom sistema. Vrne "HH:MM" ali null ob preklicu.
+function askPickupTime({ name, pickup, suggested, departure }) {
+  const value = suggested ? fmtTime(suggested) : fmtTime(departure);
+  const dlg = document.createElement('dialog');
+  dlg.innerHTML = piece(html`<form method="dialog">
+    <div class="between"><b>Potrdi rezervacijo</b><button class="icon-btn" value="close" aria-label="Zapri" formnovalidate>✕</button></div>
+    <div><b>${name}</b><div class="small muted">Prevzem: ${pickup}</div></div>
+    <div class="box"><label class="field"><span>Dogovorjen čas prevzema</span><input type="time" name="time" value="${value}" required class="mono" style="font-size:20px"></label></div>
+    <p class="small muted" style="margin:0">Odhod vožnje ob <b class="mono">${fmtTime(departure)}</b>${suggested ? html` · predlog po oceni poti: <button type="button" class="link-btn mono" data-reset>${fmtTime(suggested)}</button>` : ''}<br>
+      Potnik vidi ta čas, po njem se računata zamuda in neprihod.</p>
+    <div class="btns"><button class="btn ghost sm" value="close" formnovalidate>Prekliči</button><button class="btn sm" type="submit" value="ok">Potrdi</button></div>
+  </form>`);
+  document.body.append(dlg);
+  const form = dlg.querySelector('form');
+  dlg.querySelector('[data-reset]')?.addEventListener('click', () => { form.time.value = fmtTime(suggested); form.time.focus(); });
+  return new Promise((resolve) => {
+    let result = null;
+    form.addEventListener('submit', (e) => {
+      if (e.submitter?.value !== 'ok') return;
+      if (!form.time.value) { e.preventDefault(); form.reportValidity(); return; }
+      result = form.time.value;
+    });
+    dlg.addEventListener('close', () => { dlg.remove(); resolve(result); });
+    dlg.showModal();
+  });
+}
+
 function bindCarrierActions(reload) {
   app.querySelectorAll('[data-act]').forEach((btn) => btn.addEventListener('click', async () => {
     const act = btn.dataset.act;
     const body = {};
     if (act === 'confirm') {
-      const t = prompt('Dogovorjen čas prevzema za tega potnika (HH:MM).\nPusti prazno, da ga predlaga sistem po oceni poti.', '');
+      const t = await askPickupTime(btn.dataset);
       if (t === null) return;
-      if (t.trim()) body.pickup_time = t.trim().replace('.', ':').padStart(5, '0');
+      body.pickup_time = t;
     } else if (CARRIER_CONFIRM[act] && !confirm(CARRIER_CONFIRM[act])) return;
     btn.disabled = true;
     try {

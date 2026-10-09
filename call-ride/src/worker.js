@@ -286,7 +286,11 @@ async function carrierRides(env, user) {
     commission: COMMISSION,
     rides: rides.map((r) => ({
       ...rideOut(r),
-      bookings: bookings.filter((b) => b.ride_id === r.id),
+      bookings: bookings.filter((b) => b.ride_id === r.id).map((b) => ({
+        ...b,
+        // Predlog za obrazec ob potrditvi (isti izračun kot pri potrditvi brez ročnega časa).
+        suggested_pickup_time: b.status === 'pending' ? suggestedPickupTime(r, b.pickup) : null,
+      })),
     })),
   });
 }
