@@ -14,7 +14,8 @@ Tehnologija: en Cloudflare Worker (API + statične datoteke), baza Cloudflare D1
 - **cena odseka**: potnik plača sorazmerni del cene glede na dolžino svojega odseka (zaokroženo na cel evro, najmanj 5 €)
 - **objava iskanja**: če ni ustrezne vožnje, potnik objavi, da išče prevoz (lahko tudi z največjo ceno); v »Rezervacije« vidi, ko se pojavi ustrezna vožnja
 - **ponudba cene**: potnik pri rezervaciji ponudi nižjo ceno (najmanj 50 % cene po ceniku); pri iskanju z »Največ plačam« so dražje vožnje prikazane v razdelku »Ponudi svojo ceno«. Prevoznik ponudbo sprejme s potrditvijo ali jo zavrne
-- rezervacija deljene vožnje ali zasebnega najema celega kombija, številka leta, opomba
+- rezervacija deljene vožnje ali **zasebnega prevoza**: potnik plača svoje sedeže + doplačilo, ki ga določi prevoznik, in od njegovega prevzema do izstopa voznik ne pobira nikogar (npr. vožnja iz Milana, zasebno od Benetk do Ljubljane; pred Benetkami lahko voznik pelje druge potnike)
+- seznam **prihajajočih voženj** (14 dni) na začetni strani, številka leta, opomba
 - moje rezervacije: status, dogovorjen čas prevzema, telefon prevoznika po potrditvi, ocena po vožnji
 - **sledenje vozniku v živo**: ko voznik začne vožnjo, potnik vidi predviden prihod na svoj prevzem, zamudo glede na dogovorjen čas in zemljevid; osveževanje vsakih 30 s
 - odpoved z jasnim prikazom, ali je brezplačna ali s pristojbino

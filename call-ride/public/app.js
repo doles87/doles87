@@ -344,6 +344,7 @@ function viewHome() {
       <button class="btn" type="submit">Poišči prevoz</button>
       <p class="hint">Bolj ko je termin prožen, več ponudb dobiš — in nižjo ceno.</p>
     </form>
+    <section id="upcoming"></section>
     ${!state.me ? html`<div class="notice teal">${svg(I.van, { size: 18 })}<div><b>Ste prevoznik?</b> Objavite prazne povratne vožnje in jih zapolnite. <a href="#/registracija?vloga=prevoznik">Registracija prevoznika</a></div></div>` : ''}
   </main>`, { tab: '#/' });
 
@@ -397,6 +398,23 @@ function viewHome() {
   });
   setMode(mode);
   showNear();
+
+  // Prihajajoče vožnje: hiter pregled brez iskanja.
+  api('/rides/upcoming').then(({ rides }) => {
+    const box = app.querySelector('#upcoming');
+    if (!box || !rides.length) return;
+    box.innerHTML = piece(html`<h2>Prihajajoče vožnje</h2>
+      <div class="stack">${rides.map((r) => {
+        const via = r.route.slice(1, -1).map(city).filter((c, i, all) => all.indexOf(c) === i && c !== city(r.origin) && c !== city(r.destination));
+        return html`<a class="card upcoming" href="#/voznja/${r.id}?${new URLSearchParams({ from: r.origin, to: r.destination, seats: 1 })}">
+          <div class="between"><div style="font-weight:700">${city(r.origin)} → ${city(r.destination)}</div><div class="mono" style="font-weight:700">${eur(r.price_per_seat)}</div></div>
+          <div class="mono small muted">${fmtWhen(r.departure_at)} · ${r.company_name}</div>
+          ${via.length ? html`<div class="small muted">prek ${via.slice(0, 5).join(', ')}${via.length > 5 ? ' …' : ''}</div>` : ''}
+          <div class="small" style="margin-top:3px">${r.seats_left} prostih${r.private_allowed ? html` · <span style="color:var(--teal)">zasebno +${eur(r.private_surcharge)}</span>` : ''}</div>
+        </a>`;
+      })}</div>
+      <p class="hint small">Vstopiš lahko tudi na poti — izberi prevzem in izstop na strani vožnje. Cena velja za celo pot, za del poti je nižja.</p>`);
+  }).catch(() => {});
 
   form.addEventListener('submit', (e) => {
     e.preventDefault();
@@ -463,7 +481,7 @@ async function viewResults({ query }) {
         ${byMap ? html`<p class="small muted" style="margin:8px 0 0">Prevzem: <b style="color:var(--ink)">${r.pickup}</b> · ${km(r.pickup_km)} od tvoje točke</p>` : ''}
         ${onWay ? html`<p class="small muted" style="margin:8px 0 0">Pobere te na poti — čas je ocena, točen prevzem potrdi prevoznik.</p>` : ''}
         ${r.shared_total !== null ? html`<a class="btn sm" style="margin-top:12px" href="${link(r, 'shared')}">Rezerviraj deljeno · ${eur(r.shared_total)}</a>` : ''}
-        ${r.private_total !== null ? html`<a class="private-offer" href="${link(r, 'private')}"><span>Zasebno · cel kombi, brez drugih potnikov</span><b>${eur(r.private_total)}</b></a>` : ''}
+        ${r.private_total !== null ? html`<a class="private-offer" href="${link(r, 'private')}"><span>Zasebno · od ${city(r.pickup)} do ${city(q.to)} brez drugih potnikov (+${eur(r.private_surcharge)})</span><b>${eur(r.private_total)}</b></a>` : ''}
       </div></article>`;
     })}
     ${offerRides.length ? html`<h2>Ponudi svojo ceno</h2>
@@ -521,9 +539,10 @@ async function viewRide({ params, query }) {
   let pickup = pts.includes(query.get('from')) ? query.get('from') : pts[0];
   let dropoff = pts.includes(query.get('to')) && pts.indexOf(query.get('to')) > pts.indexOf(pickup) ? query.get('to') : pts[pts.length - 1];
   const seatsMax = Math.max(1, Math.min(ride.seats_left, 8));
-  let seats = Math.min(Number(query.get('seats') || 1), ride.private_available ? ride.seats_total : seatsMax);
-  let kind = query.get('kind') === 'private' && ride.private_available ? 'private' : 'shared';
-  if (ride.seats_left < 1 && ride.private_available) kind = 'private';
+  let seats = Math.min(Number(query.get('seats') || 1), seatsMax);
+  let kind = query.get('kind') === 'private' && ride.private_allowed ? 'private' : 'shared';
+  // Ali se odsek prekriva z rezervacijo, ki to preprečuje (zasebni ne deli vozila, deljeni ne z zasebnim).
+  const blocked = (a, b, k) => ride.busy.some((x) => a < x.to && x.from < b && (k === 'private' || x.kind === 'private'));
 
   render(html`${head}<main>
     <div class="between" style="align-items:center">
@@ -544,11 +563,12 @@ async function viewRide({ params, query }) {
       </div>
       <div class="row">
         <div class="stat"><div class="k">Odhod iz ${city(ride.origin)}</div><div class="v">${fmtTime(ride.departure_at)}</div><div class="small muted">${fmtDay(ride.departure_at)}</div></div>
-        <div class="box"><label class="field" style="padding:9px 0"><span>Potniki</span><select name="seats">${Array.from({ length: ride.private_available ? Math.min(ride.seats_total, 8) : seatsMax }, (_, i) => i + 1).map((n) => html`<option value="${n}" ${n === seats ? raw('selected') : ''}>${persons(n)}</option>`)}</select></label></div>
+        <div class="box"><label class="field" style="padding:9px 0"><span>Potniki</span><select name="seats">${Array.from({ length: seatsMax }, (_, i) => i + 1).map((n) => html`<option value="${n}" ${n === seats ? raw('selected') : ''}>${persons(n)}</option>`)}</select></label></div>
       </div>
       ${ride.note ? html`<div class="notice teal">${svg(I.info, { size: 17 })}<div><b>Opomba prevoznika:</b> ${ride.note}</div></div>` : ''}
       <div class="notice" id="shared-note">${svg(I.alert, { size: 17, stroke: '#B9770E' })}<div><b>Deljena vožnja.</b> Prevoznik lahko na poti pobere še druge potnike, zato se prihod lahko podaljša${ride.max_detour_min ? ` (največ ~${ride.max_detour_min} min ovinka)` : ''}. Točen čas prevzema ti potrdi prevoznik.</div></div>
-      ${ride.private_available ? html`<label class="check"><input type="checkbox" name="private" ${kind === 'private' ? raw('checked') : ''}><span><b>Raje zasebno</b> (${eur(ride.private_price)} za cel kombi) — direktno, brez pobiranja drugih potnikov.</span></label>` : ''}
+      ${ride.private_allowed ? html`<label class="check"><input type="checkbox" name="private" ${kind === 'private' ? raw('checked') : ''}><span><b>Zasebni prevoz</b> (doplačilo ${eur(ride.private_surcharge)}) — od tvojega prevzema do izstopa voznik ne pobira nikogar drugega in pelje direktno.</span></label>
+        <div class="small muted" id="private-note" hidden></div>` : ''}
       <div class="card stack">
         <label class="check" style="margin:0"><input type="checkbox" name="offer_on" ${query.get('offer') ? raw('checked') : ''}><span><b>Ponudi svojo ceno</b> — prevoznik jo sprejme ali zavrne.</span></label>
         <div class="box" id="offer-box" hidden><label class="field"><span>Moja ponudba skupaj (€)</span><input type="number" name="offer_total" min="1" step="1" inputmode="decimal" class="mono" value="${query.get('offer') || ''}"></label></div>
@@ -576,12 +596,19 @@ async function viewRide({ params, query }) {
     app.querySelector('#route').innerHTML = piece(pts.map((p, i) => html`<li class="${i === a || i === b ? 'mine' : ''}"><span class="dot"></span><span>${p}${i === 0 ? html` <span class="mono muted small">${fmtTime(ride.departure_at)}</span>` : ''}${i === a ? ' · prevzem' : i === b ? ' · izstop' : ''}</span></li>`)
       .filter((_, i) => i === 0 || i === pts.length - 1 || i === a || i === b || ride.stops.includes(pts[i]) || (i > a && i < b)));
     const seatPrice = ride.segment_prices[`${a}-${b}`] ?? ride.price_per_seat;
-    const total = kind === 'private' ? ride.private_price : seatPrice * seats;
-    app.querySelector('#calc').textContent = kind === 'private' ? 'Zasebni najem · cel kombi' : `${seatsWord(seats)} × ${eur(seatPrice)}`;
+    const total = kind === 'private' ? seatPrice * seats + ride.private_surcharge : seatPrice * seats;
+    app.querySelector('#calc').textContent = kind === 'private'
+      ? `Zasebno · ${seatsWord(seats)} × ${eur(seatPrice)} + ${eur(ride.private_surcharge)}` : `${seatsWord(seats)} × ${eur(seatPrice)}`;
+    const privNote = app.querySelector('#private-note');
+    if (privNote) {
+      privNote.hidden = !blocked(a, b, 'private');
+      privNote.textContent = 'Na tem delu poti so že drugi potniki, zato zasebni prevoz tu ni mogoč.';
+    }
     app.querySelector('#total').textContent = eur(total);
     app.querySelector('#shared-note').hidden = kind === 'private';
     const invalid = a >= b;
-    const noSeats = kind === 'shared' && seats > ride.seats_left;
+    const noSeats = seats > ride.seats_left;
+    const segBlocked = a < b && blocked(a, b, kind);
     // Ponudba: med 50 % cene (na cel evro navzgor) in ceno po ceniku.
     const offerOn = form.offer_on.checked;
     const minOffer = Math.ceil((total * (state.config.offer_min_percent || 50)) / 10000) * 100;
@@ -596,8 +623,9 @@ async function viewRide({ params, query }) {
       app.querySelector('#calc').textContent = 'Tvoja ponudba';
     }
     const btn = app.querySelector('#book-btn');
-    btn.disabled = invalid || noSeats || offerBad;
+    btn.disabled = invalid || noSeats || offerBad || segBlocked;
     btn.textContent = invalid ? 'Izstop mora biti za prevzemom' : noSeats ? `Prostih je le ${seatsWord(ride.seats_left)}`
+      : segBlocked ? (kind === 'private' ? 'Zasebno tu ni mogoče' : 'Ta del poti je rezerviran zasebno')
       : offerBad ? (offer >= total ? 'Ponudba mora biti nižja od cene' : `Ponudba najmanj ${eur(minOffer)}`)
         : !state.me ? 'Prijavi se in rezerviraj'
           : offerOn ? `Pošlji ponudbo · ${eur(offer)}` : `Rezerviraj · ${eur(total)}`;
@@ -691,7 +719,7 @@ async function viewMyBookings() {
         ${pill(b.status)}
       </div>
       <div class="mono small muted" style="margin-top:5px">${fmtWhen(b.departure_at)} · ${b.company_name}</div>
-      <div class="small muted" style="margin-top:4px">${b.pickup} → ${b.dropoff} · ${b.kind === 'private' ? 'cel kombi' : persons(b.seats)}</div>
+      <div class="small muted" style="margin-top:4px">${b.pickup} → ${b.dropoff} · ${persons(b.seats)}${b.kind === 'private' ? ' · brez drugih potnikov' : ''}</div>
       ${b.flight_number ? html`<div class="small muted">Let <b class="mono" style="color:var(--ink)">${b.flight_number}</b></div>` : ''}
       ${b.status === 'confirmed' && b.pickup_time ? html`<div class="small" style="margin-top:4px">Dogovorjen prevzem ob <b class="mono">${fmtTime(b.pickup_time)}</b>${b.pickup_time.slice(0, 10) !== b.departure_at.slice(0, 10) ? ` (${fmtDay(b.pickup_time)})` : ''}</div>` : ''}
       ${b.list_total ? html`<div class="small" style="margin-top:4px">${b.status === 'pending' ? html`Tvoja ponudba <b class="mono">${eur(b.total)}</b> (cenik ${eur(b.list_total)}) — čaka, da jo prevoznik sprejme.`
@@ -912,7 +940,7 @@ function viewProfile() {
     </div>` : ''}
     <div class="card small" style="line-height:1.5">
       <b>Kako deluje Call ride</b>
-      <p style="margin:6px 0 0" class="muted">Prevozniki, ki se vračajo prazni (npr. po prevozu na letališče v Benetkah), objavijo povratno vožnjo. Potniki na poti rezervirajo sedež ali cel kombi po nižji ceni. Prevoznik rezervacijo potrdi, plačilo pa se v testni fazi opravi neposredno pri njem.</p>
+      <p style="margin:6px 0 0" class="muted">Prevozniki, ki se vračajo prazni (npr. po prevozu na letališče v Benetkah), objavijo povratno vožnjo. Potniki na poti rezervirajo sedež po nižji ceni ali z doplačilom zasebni prevoz brez drugih potnikov. Prevoznik rezervacijo potrdi, plačilo pa se v testni fazi opravi neposredno pri njem.</p>
     </div>
     <button class="btn ghost" id="logout">Odjava</button>
   </main>`, { tab: '#/profil' });
@@ -976,12 +1004,12 @@ async function viewCarrier() {
         ${pill(r.status)}
       </div>
       ${r.route.length > 2 ? html`<div class="small muted" style="margin-top:6px">Na poti: ${r.route.slice(1, -1).map(city).filter((c, i, all) => all.indexOf(c) === i).join(' · ')}</div>` : ''}
-      <div class="small muted" style="margin-top:4px">${eur(r.price_per_seat)} / sedež${r.private_allowed ? ` · zasebno ${eur(r.private_price)}` : ''}</div>
+      <div class="small muted" style="margin-top:4px">${eur(r.price_per_seat)} / sedež${r.private_allowed ? ` · zasebno +${eur(r.private_surcharge)}` : ''}</div>
       ${(() => { const n = r.status === 'open' ? requests.filter((q) => q.rides.includes(r.id)).length : 0; return n ? html`<button type="button" class="notice teal small" style="margin-top:10px;width:100%;text-align:left;border:none" data-scroll="iskanja">${svg(I.user, { size: 16 })}<div><b>${n}</b> ${n === 1 ? 'potnik išče' : 'potnikov išče'} prevoz na tej vožnji — poglej spodaj.</div></button>` : ''; })()}
       ${r.bookings.length ? '' : html`<p class="small muted" style="margin:10px 0 0">Še ni rezervacij.</p>`}
       ${r.bookings.map((b) => html`<div class="passenger">
         <div class="between">
-          <div><b>${b.passenger_name}</b> · ${b.kind === 'private' ? 'zasebno' : persons(b.seats)} ${pill(b.status)}
+          <div><b>${b.passenger_name}</b> · ${persons(b.seats)}${b.kind === 'private' ? html` <span class="pill wait">zasebno ${city(b.pickup)}→${city(b.dropoff)}</span>` : ''} ${pill(b.status)}
             <div class="small muted">${city(b.pickup)} → ${city(b.dropoff)}${b.flight_number ? html` · let <b class="mono">${b.flight_number}</b>` : ''}</div>
             ${b.note ? html`<div class="small" style="margin-top:3px">„${b.note}“</div>` : ''}
             ${b.status === 'confirmed' && b.pickup_time ? html`<div class="small">Prevzem ob <b class="mono">${fmtTime(b.pickup_time)}</b>${b.picked_up_at ? html` · <span class="pill ok">pobran</span>` : ''}</div>` : ''}
@@ -1135,9 +1163,10 @@ async function viewNewRide({ query }) {
       <div id="price-tip"></div>
       <div class="box"><label class="field"><span>Največji ovinek za pobiranje (min)</span><input type="number" name="max_detour_min" min="0" max="180" value="20" inputmode="numeric" class="mono"></label></div>
       <div class="card stack">
-        <label class="between" style="align-items:center;cursor:pointer"><span><b style="font-size:14px">Dovoli zasebni najem</b><br><span class="small muted">cel kombi za eno skupino · ceno določiš sam</span></span>
+        <label class="between" style="align-items:center;cursor:pointer"><span><b style="font-size:14px">Dovoli zasebni prevoz</b><br><span class="small muted">potnik doplača, ti pa od njegovega prevzema do izstopa ne pobiraš nikogar</span></span>
           <input type="checkbox" name="private_allowed" style="width:22px;height:22px;accent-color:var(--teal)"></label>
-        <div class="box" id="private-price" hidden><label class="field"><span>Cena zasebnega najema (€)</span><input type="number" name="private_price" min="0" step="1" value="90" inputmode="decimal" class="mono"></label></div>
+        <div class="box" id="private-price" hidden><label class="field"><span>Doplačilo za zasebni prevoz (€)</span><input type="number" name="private_surcharge" min="0" step="5" value="50" inputmode="decimal" class="mono"></label></div>
+        <div class="small muted" id="private-hint" hidden>Potnik plača ceno svojih sedežev + doplačilo. Doplačilo naj pokrije sedeže, ki jih na tem delu ne prodaš — npr. 50 € za krajši, 100 € za daljši odsek.</div>
       </div>
       <div class="card">
         <div class="small muted" style="margin-bottom:9px">Kraji na poti — potniki iz njih te najdejo samodejno. Ovinke (letališča, središča mest) dodaj, če lahko tam pobiraš.</div>
@@ -1225,7 +1254,10 @@ async function viewNewRide({ query }) {
   form.origin.addEventListener('change', routeChanged);
   form.destination.addEventListener('change', routeChanged);
   form.date.addEventListener('change', drawRequests);
-  form.private_allowed.addEventListener('change', () => { app.querySelector('#private-price').hidden = !form.private_allowed.checked; });
+  form.private_allowed.addEventListener('change', () => {
+    app.querySelector('#private-price').hidden = !form.private_allowed.checked;
+    app.querySelector('#private-hint').hidden = !form.private_allowed.checked;
+  });
   drawPrice();
 
   form.addEventListener('submit', (e) => {
@@ -1244,7 +1276,7 @@ async function viewNewRide({ query }) {
           price_per_seat: Number(d.price_per_seat),
           max_detour_min: Number(d.max_detour_min || 0),
           private_allowed: !!d.private_allowed,
-          private_price: d.private_allowed ? Number(d.private_price) : null,
+          private_surcharge: d.private_allowed ? Number(d.private_surcharge) : null,
           note: d.note,
         },
       });
@@ -1389,11 +1421,11 @@ async function viewAdmin() {
     </article>`) : html`<div class="card empty">Ni prijavljenih prevoznikov.</div>`}</div>`;
 
   const ridesHtml = html`<div class="table-wrap"><table><thead><tr><th>Odhod</th><th>Relacija</th><th>Prevoznik</th><th>Sedeži</th><th>Cena</th><th>Status</th><th></th></tr></thead><tbody>
-    ${data.rides.map((r) => html`<tr><td class="mono">${r.departure_at.replace('T', ' ')}</td><td>${city(r.origin)} → ${city(r.destination)}${r.stops.length ? html`<div class="small muted">prek ${r.stops.map(city).join(', ')}</div>` : ''}</td><td>${r.company_name}</td><td class="mono">${r.seats_total - r.seats_left}/${r.seats_total}</td><td class="mono">${eur(r.price_per_seat)}${r.private_allowed ? html`<div class="small muted">zas. ${eur(r.private_price)}</div>` : ''}</td><td>${pill(r.status)}</td><td>${r.status === 'open' ? html`<button class="btn danger sm" style="height:34px;padding:0 10px" data-ride-cancel="${r.id}">Odpovej</button>` : ''}</td></tr>`)}
+    ${data.rides.map((r) => html`<tr><td class="mono">${r.departure_at.replace('T', ' ')}</td><td>${city(r.origin)} → ${city(r.destination)}${r.stops.length ? html`<div class="small muted">prek ${r.stops.map(city).join(', ')}</div>` : ''}</td><td>${r.company_name}</td><td class="mono">${r.seats_total - r.seats_left}/${r.seats_total}</td><td class="mono">${eur(r.price_per_seat)}${r.private_allowed ? html`<div class="small muted">zas. +${eur(r.private_surcharge)}</div>` : ''}</td><td>${pill(r.status)}</td><td>${r.status === 'open' ? html`<button class="btn danger sm" style="height:34px;padding:0 10px" data-ride-cancel="${r.id}">Odpovej</button>` : ''}</td></tr>`)}
   </tbody></table></div>`;
 
   const bookingsHtml = html`<div class="table-wrap"><table><thead><tr><th>Oddano</th><th>Odhod</th><th>Relacija</th><th>Potnik</th><th>Prevoznik</th><th>Tip</th><th>Znesek</th><th>Status</th><th>Pristojbina</th></tr></thead><tbody>
-    ${data.bookings.map((b) => html`<tr><td class="small">${b.created_at}</td><td class="mono">${b.departure_at.replace('T', ' ')}</td><td>${city(b.pickup)} → ${city(b.dropoff)}</td><td>${b.passenger_name}</td><td>${b.company_name}</td><td>${b.kind === 'private' ? 'zasebna' : `deljena · ${b.seats}`}</td><td class="mono">${eur(b.total)}</td><td>${pill(b.status)}</td><td class="small">${b.cancel_fee ? html`<b class="mono">${eur(b.cancel_fee)}</b> · ${b.cancel_reason || ''}` : b.cancel_reason || ''}</td></tr>`)}
+    ${data.bookings.map((b) => html`<tr><td class="small">${b.created_at}</td><td class="mono">${b.departure_at.replace('T', ' ')}</td><td>${city(b.pickup)} → ${city(b.dropoff)}</td><td>${b.passenger_name}</td><td>${b.company_name}</td><td>${b.kind === 'private' ? `zasebna · ${b.seats}` : `deljena · ${b.seats}`}</td><td class="mono">${eur(b.total)}</td><td>${pill(b.status)}</td><td class="small">${b.cancel_fee ? html`<b class="mono">${eur(b.cancel_fee)}</b> · ${b.cancel_reason || ''}` : b.cancel_reason || ''}</td></tr>`)}
   </tbody></table></div>`;
 
   const usersHtml = html`<div class="table-wrap"><table><thead><tr><th>Ime</th><th>E-pošta</th><th>Telefon</th><th>Vloga</th><th>Registriran</th></tr></thead><tbody>

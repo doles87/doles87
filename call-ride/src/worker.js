@@ -196,7 +196,7 @@ function rideOut(r) {
     price_per_seat: r.price_per_seat,
     private_allowed: !!r.private_allowed,
     private_available: !!r.private_allowed && r.active_bookings === 0,
-    private_price: r.private_price,
+    private_surcharge: r.private_allowed ? r.private_surcharge ?? 0 : null,
     max_detour_min: r.max_detour_min,
     note: r.note,
     status: r.status,
@@ -222,6 +222,33 @@ function nearestPickup(ride, near, to) {
   return near.find((x) => { const a = points.indexOf(x.place); return a !== -1 && a < b; }) || null;
 }
 
+// ---------- zasebni prevoz na delu poti ----------
+
+// Aktivne rezervacije po vožnjah: Map ride_id -> [{ pickup, dropoff, kind }].
+async function activeBookings(env, rideIds) {
+  const out = new Map(rideIds.map((id) => [id, []]));
+  if (!rideIds.length) return out;
+  const { results } = await env.DB.prepare(
+    `SELECT ride_id, pickup, dropoff, kind FROM bookings WHERE status IN ${ACTIVE_BOOKING} AND ride_id IN (${rideIds.map(() => '?').join(',')})`,
+  ).bind(...rideIds).all();
+  results.forEach((b) => out.get(b.ride_id)?.push(b));
+  return out;
+}
+
+// Ali se odsek pickup -> dropoff prekriva z obstoječo rezervacijo, ki to preprečuje:
+// zasebni potnik ne sme deliti vozila z nikomer, deljeni potnik ne z zasebnim.
+function segmentBlocked(ride, bookings, pickup, dropoff, kind) {
+  const pts = ridePoints(ride);
+  const a = pts.indexOf(pickup);
+  const b = pts.indexOf(dropoff);
+  return bookings.some((x) => {
+    const overlap = a < pts.indexOf(x.dropoff) && pts.indexOf(x.pickup) < b;
+    return overlap && (kind === 'private' || x.kind === 'private');
+  });
+}
+
+const privateTotalFor = (ride, pickup, dropoff, seats) => segmentPrice(ride, pickup, dropoff) * seats + (ride.private_surcharge ?? 0);
+
 // Vožnje, ki potnika peljejo od (ali iz radija okoli izbrane točke) do cilja na izbrani dan.
 // Časovno okno se primerja z ocenjenim časom prevzema na potnikovi točki, ne z odhodom iz začetka
 // (vožnja iz Milana ob 8:00 pride v Trst okoli 12:00).
@@ -235,6 +262,7 @@ async function findRides(env, { from, near, to, date, timeFrom = '00:00', timeTo
      ORDER BY r.departure_at`,
   ).bind(dayBefore, `${date}T${timeTo}`, now).all();
 
+  const busy = await activeBookings(env, results.map((r) => r.id));
   return results
     .map((r) => {
       const pick = near ? nearestPickup(r, near, to) : (segmentMatches(r, from, to) ? { place: from, km: null } : null);
@@ -247,14 +275,13 @@ async function findRides(env, { from, near, to, date, timeFrom = '00:00', timeTo
         pickup_km: pick.km === null ? null : Math.round(pick.km * 10) / 10,
         pickup_eta: eta,
         seat_price: segmentPrice(r, pick.place, to),
+        shared_total: seats <= r.seats_left && !segmentBlocked(r, busy.get(r.id), pick.place, to, 'shared')
+          ? segmentPrice(r, pick.place, to) * seats : null,
+        private_total: r.private_allowed && seats <= r.seats_left && !segmentBlocked(r, busy.get(r.id), pick.place, to, 'private')
+          ? privateTotalFor(r, pick.place, to, seats) : null,
       };
     })
     .filter(Boolean)
-    .map((r) => {
-      const sharedTotal = r.seats_left >= seats ? r.seat_price * seats : null;
-      const privateTotal = r.private_available && r.seats_total >= seats ? r.private_price : null;
-      return { ...r, shared_total: sharedTotal, private_total: privateTotal };
-    })
     .filter((r) => r.shared_total !== null || r.private_total !== null)
     .filter((r) => maxTotal === null || Math.min(r.shared_total ?? Infinity, r.private_total ?? Infinity) <= maxTotal)
     .sort((a, b) => (a.shared_total ?? a.private_total) - (b.shared_total ?? b.private_total));
@@ -463,16 +490,22 @@ async function createRide(env, user, body) {
   const seats = int(body.seats_total, 'prosti sedeži', 1, 60);
   const price = euroToCents(body.price_per_seat, 'cena na sedež');
   const privateAllowed = !!body.private_allowed;
-  const privatePrice = privateAllowed ? euroToCents(body.private_price, 'cena zasebnega najema') : null;
+  // Doplačilo za zasebni prevoz (starejši odjemalci pošljejo private_price za celo pot).
+  let surcharge = null;
+  if (privateAllowed) {
+    surcharge = body.private_surcharge !== undefined && body.private_surcharge !== null && body.private_surcharge !== ''
+      ? euroToCents(body.private_surcharge, 'doplačilo za zasebni prevoz')
+      : Math.max(0, euroToCents(body.private_price ?? 0, 'cena zasebnega najema') - price);
+  }
   const detour = int(body.max_detour_min ?? 0, 'največji ovinek', 0, 180);
   const note = str(body.note, 'opomba', { required: false, max: 500 });
 
   const res = await env.DB.prepare(
     `INSERT INTO rides (carrier_id, origin, destination, stops, departure_at, seats_total, price_per_seat,
-       private_allowed, private_price, max_detour_min, note)
+       private_allowed, private_surcharge, max_detour_min, note)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(user.id, origin, destination, JSON.stringify(stops), departure, seats, price,
-    privateAllowed ? 1 : 0, privatePrice, detour, note).run();
+    privateAllowed ? 1 : 0, surcharge, detour, note).run();
   return json({ id: res.meta.last_row_id }, 201);
 }
 
@@ -548,19 +581,19 @@ async function createBooking(env, user, body) {
   if (!segmentMatches(ride, pickup, dropoff)) fail(400, 'Ta vožnja ne pelje po tej relaciji.');
 
   const kind = body.kind === 'private' ? 'private' : 'shared';
-  let seats = int(body.seats, 'potniki', 1, 60);
+  const seats = int(body.seats, 'potniki', 1, 60);
   let total;
-  let capacityCheck;
   if (kind === 'private') {
-    if (!ride.private_allowed) fail(400, 'Zasebni najem za to vožnjo ni na voljo.');
-    if (seats > ride.seats_total) fail(400, 'V vozilu ni dovolj sedežev.');
-    seats = ride.seats_total; // zasebni najem zasede cel kombi
-    total = ride.private_price;
-    capacityCheck = `NOT EXISTS (SELECT 1 FROM bookings WHERE ride_id = ? AND status IN ${ACTIVE_BOOKING})`;
+    if (!ride.private_allowed) fail(400, 'Zasebni prevoz za to vožnjo ni na voljo.');
+    total = privateTotalFor(ride, pickup, dropoff, seats);
   } else {
     total = segmentPrice(ride, pickup, dropoff) * seats;
-    capacityCheck = `(SELECT seats_total FROM rides WHERE id = ?) - COALESCE((SELECT SUM(seats) FROM bookings WHERE ride_id = ? AND status IN ${ACTIVE_BOOKING}), 0) >= ${seats}`;
   }
+  const blocked = () => activeBookings(env, [rideId]).then((m) => segmentBlocked(ride, m.get(rideId), pickup, dropoff, kind));
+  if (await blocked()) {
+    fail(409, kind === 'private' ? 'Na tem delu poti so že drugi potniki, zato zasebni prevoz ni mogoč.' : 'Na tem delu poti je vožnja rezervirana kot zasebna.');
+  }
+  const capacityCheck = `(SELECT seats_total FROM rides WHERE id = ?) - COALESCE((SELECT SUM(seats) FROM bookings WHERE ride_id = ? AND status IN ${ACTIVE_BOOKING}), 0) >= ${seats}`;
   const flight = str(body.flight_number, 'številka leta', { required: false, max: 12 });
   const note = str(body.note, 'opomba', { required: false, max: 500 });
 
@@ -577,14 +610,23 @@ async function createBooking(env, user, body) {
   }
 
   // Preverba prostih sedežev in vnos v enem stavku, da se dve hkratni rezervaciji ne prekrijeta.
-  const capacityBinds = kind === 'private' ? [rideId] : [rideId, rideId];
+  const capacityBinds = [rideId, rideId];
   const res = await env.DB.prepare(
     `INSERT INTO bookings (ride_id, passenger_id, pickup, dropoff, seats, kind, total, list_total, flight_number, note)
      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
      WHERE (SELECT status FROM rides WHERE id = ?) = 'open' AND ${capacityCheck}`,
   ).bind(rideId, user.id, pickup, dropoff, seats, kind, total, listTotal, flight, note, rideId, ...capacityBinds).run();
   if (!res.meta.changes) fail(409, 'Žal ni več dovolj prostih sedežev.');
-  return json({ id: res.meta.last_row_id, total, list_total: listTotal }, 201);
+  const id = res.meta.last_row_id;
+  // Hkratna rezervacija istega odseka: obdrži prejšnjo, to umakni.
+  const { results: clash } = await env.DB.prepare(
+    `SELECT pickup, dropoff, kind FROM bookings WHERE ride_id = ? AND id < ? AND status IN ${ACTIVE_BOOKING}`,
+  ).bind(rideId, id).all();
+  if (segmentBlocked(ride, clash, pickup, dropoff, kind)) {
+    await env.DB.prepare('DELETE FROM bookings WHERE id = ?').bind(id).run();
+    fail(409, 'Medtem je nekdo rezerviral ta del poti. Poskusi znova.');
+  }
+  return json({ id, total, list_total: listTotal }, 201);
 }
 
 async function myBookings(env, user) {
@@ -892,10 +934,23 @@ async function handleApi(request, env, url) {
 
   if (path === '/rides/search' && method === 'GET') return searchRides(env, url);
 
+  // Prihajajoče vožnje (naslednjih 14 dni) za pregled na začetni strani.
+  if (path === '/rides/upcoming' && method === 'GET') {
+    const now = nowLocal();
+    const { results } = await env.DB.prepare(
+      `${RIDE_SELECT} WHERE r.status = 'open' AND c.status = 'approved' AND r.departure_at > ? AND r.departure_at <= ?
+       ORDER BY r.departure_at LIMIT 30`,
+    ).bind(now, msToLocal(nowLocalMs() + 14 * 86400000)).all();
+    return json({ rides: results.map(rideOut).filter((r) => r.seats_left > 0) });
+  }
+
   if ((m = path.match(/^\/rides\/(\d+)$/)) && method === 'GET') {
     const ride = await getRide(env, Number(m[1]));
     if (ride.status !== 'open' && !user) fail(404, 'Vožnja ne obstaja.');
-    return json({ ride: { ...rideOut(ride), segment_prices: segmentPrices(ride) } });
+    const pts = ridePoints(ride);
+    const busy = (await activeBookings(env, [ride.id])).get(ride.id)
+      .map((b) => ({ from: pts.indexOf(b.pickup), to: pts.indexOf(b.dropoff), kind: b.kind }));
+    return json({ ride: { ...rideOut(ride), segment_prices: segmentPrices(ride), busy } });
   }
 
   if (path === '/rides' && method === 'POST') {

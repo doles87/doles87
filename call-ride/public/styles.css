@@ -211,3 +211,4 @@ tr:last-child td { border-bottom: none; }
 @media (min-width: 720px) {
   .admin-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 }
+.card.upcoming { display: block; text-decoration: none; color: inherit; }

@@ -82,7 +82,7 @@ test('celoten tok: registracija, preverba, objava, iskanje, rezervacija, zaklju�
   // Odsek Trst → Postojna stane sorazmerno manj kot cela pot (22 € / sedež), a najmanj 5 €.
   assert.ok(found.seat_price >= 500 && found.seat_price < 2200, `cena odseka ${found.seat_price}`);
   assert.equal(found.shared_total, found.seat_price * 2);
-  assert.equal(found.private_total, 9000);
+  assert.equal(found.private_total, found.seat_price * 2 + 6800, "zasebno = sedeži × cena odseka + doplačilo (90 € − 22 €)");
   r = await passenger(`/rides/search?${new URLSearchParams({ from: VCE, to: LJ, date, seats: 2 })}`);
   assert.equal(r.data.rides.find((x) => x.id === rideId).shared_total, 4400, 'cela pot = polna cena');
   r = await passenger(`/rides/search?${new URLSearchParams({ from: POSTOJNA, to: TRST, date, seats: 2 })}`);
