@@ -1,4 +1,4 @@
-// Povratek — mobilni spletni vmesnik (brez build koraka).
+// Call ride — mobilni spletni vmesnik (brez build koraka).
 
 const app = document.getElementById('app');
 const state = { me: null, carrier: null, places: [], config: { policy: {} } };
@@ -155,7 +155,7 @@ function header({ title, sub, back = true, carrier = false, right = '' } = {}) {
 function brandHeader() {
   const u = state.me;
   return html`<header class="top">
-    <a class="brand" href="#/"><b>Povratek</b><span class="badge-beta">beta</span></a>
+    <a class="brand" href="#/"><b>Call ride</b><span class="badge-beta">beta</span></a>
     <div class="grow"></div>
     ${u ? html`<a class="top-link" href="#/profil">${u.name.split(' ')[0]}</a>` : html`<a class="top-link" href="#/prijava">Prijava</a>`}
   </header>`;
@@ -176,7 +176,7 @@ function feedbackButton() {
   return html`<button class="fb-btn" data-feedback>${svg(I.chat, { size: 16 })} Mnenje</button>
   <dialog id="fb-dialog"><form method="dialog" id="fb-form">
     <div class="between"><b>Povratne informacije</b><button class="icon-btn" value="close" aria-label="Zapri" formnovalidate>✕</button></div>
-    <p class="muted small" style="margin:0">Kaj ne deluje, kaj je nejasno, kaj pogrešaš? Sporočilo prejme ekipa Povratka.</p>
+    <p class="muted small" style="margin:0">Kaj ne deluje, kaj je nejasno, kaj pogrešaš? Sporočilo prejme ekipa Call ride.</p>
     <div class="box"><label class="field"><span>Sporočilo</span><textarea name="message" required maxlength="2000"></textarea></label></div>
     <div class="err" hidden></div>
     <button class="btn dark sm" type="submit" value="send">Pošlji</button>
@@ -632,7 +632,7 @@ function viewRegister({ query }) {
         <label class="field"><span>Geslo (vsaj 8 znakov)</span><input type="password" name="password" required minlength="8" autocomplete="new-password"></label>
       </div>
       <div id="carrier-fields"></div>
-      <label class="check"><input type="checkbox" name="agree" required><span>Razumem, da je Povratek v <b>testni fazi</b> in da se plačilo opravi neposredno pri prevozniku.</span></label>
+      <label class="check"><input type="checkbox" name="agree" required><span>Razumem, da je Call ride v <b>testni fazi</b> in da se plačilo opravi neposredno pri prevozniku.</span></label>
       <div class="err" hidden></div>
       <button class="btn" type="submit" id="reg-btn">Ustvari račun</button>
     </form>
@@ -665,7 +665,7 @@ function viewRegister({ query }) {
       }
       await api('/auth/register', { method: 'POST', body });
       await loadMe();
-      toast(role === 'carrier' ? 'Račun ustvarjen. Podatke bomo preverili.' : 'Dobrodošel v Povratku!');
+      toast(role === 'carrier' ? 'Račun ustvarjen. Podatke bomo preverili.' : 'Dobrodošel v aplikaciji Call ride!');
       go(afterLoginTarget(next));
     });
   });
@@ -691,7 +691,7 @@ function viewProfile() {
       <a class="btn ghost sm" href="#/prevoznik/podatki">Uredi podatke podjetja</a>
     </div>` : ''}
     <div class="card small" style="line-height:1.5">
-      <b>Kako deluje Povratek</b>
+      <b>Kako deluje Call ride</b>
       <p style="margin:6px 0 0" class="muted">Prevozniki, ki se vračajo prazni (npr. po prevozu na letališče v Benetkah), objavijo povratno vožnjo. Potniki na poti rezervirajo sedež ali cel kombi po nižji ceni. Prevoznik rezervacijo potrdi, plačilo pa se v testni fazi opravi neposredno pri njem.</p>
     </div>
     <button class="btn ghost" id="logout">Odjava</button>
@@ -1020,7 +1020,7 @@ let adminTab = 'carriers';
 async function viewAdmin() {
   if (!requireLogin()) return;
   if (state.me.role !== 'admin') return go('#/');
-  const head = html`<header class="top"><a class="brand" href="#/admin"><b>Povratek</b><span class="badge-beta">admin</span></a><div class="grow"></div><a class="top-link" href="#/">Potniški pogled</a></header>`;
+  const head = html`<header class="top"><a class="brand" href="#/admin"><b>Call ride</b><span class="badge-beta">admin</span></a><div class="grow"></div><a class="top-link" href="#/">Potniški pogled</a></header>`;
   render(html`${head}<div class="admin-layout"><p class="muted">Nalagam …</p></div>`, { tab: '#/admin', wide: true, feedback: false });
   const data = await api('/admin/overview');
   const s = data.stats;

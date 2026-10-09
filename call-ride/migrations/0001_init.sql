@@ -1,4 +1,4 @@
--- Povratek: začetna shema (Cloudflare D1 / SQLite)
+-- Call ride: začetna shema (Cloudflare D1 / SQLite)
 
 CREATE TABLE users (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,

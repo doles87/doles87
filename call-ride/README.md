@@ -1,4 +1,4 @@
-# Povratek
+# Call ride
 
 Platforma za prazne povratne vožnje prevoznikov na koridorju **Benetke ↔ Trst ↔ Postojna ↔ Ljubljana**.
 Prevoznik, ki se vrača prazen, objavi vožnjo, potniki na poti pa rezervirajo sedež ali cel kombi.
@@ -67,10 +67,10 @@ Omejitev spletne aplikacije: brskalnik pošilja lokacijo le, ko je stran odprta.
 ## Postavitev na Cloudflare
 
 ```bash
-cd povratek
+cd call-ride
 npm install
 npx wrangler login
-npx wrangler d1 create povratek          # izpisani database_id prilepi v wrangler.toml
+npx wrangler d1 create call-ride          # izpisani database_id prilepi v wrangler.toml
 npm run db:migrate:remote
 npx wrangler secret put ADMIN_EMAILS     # npr. ime@domena.si (ta e-naslov ob registraciji dobi vlogo admin)
 npm run deploy
@@ -81,7 +81,7 @@ Nato se z admin e-naslovom registriraj v aplikaciji in potrjuj prevoznike v zavi
 ## Lokalni razvoj in testi
 
 ```bash
-cd povratek
+cd call-ride
 npm install
 printf 'ADMIN_EMAILS="admin@test.si"\nFREE_CANCEL_GRACE_MIN="0"\n' > .dev.vars
 npm run db:migrate:local

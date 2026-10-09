@@ -1,4 +1,4 @@
-name = "povratek"
+name = "call-ride"
 main = "src/worker.js"
 compatibility_date = "2026-09-01"
 
@@ -10,8 +10,8 @@ run_worker_first = ["/api/*"]
 
 [[d1_databases]]
 binding = "DB"
-database_name = "povratek"
-# Po `npx wrangler d1 create povratek` sem prilepi database_id, ki ga izpiše ukaz.
+database_name = "call-ride"
+# Po `npx wrangler d1 create call-ride` sem prilepi database_id, ki ga izpiše ukaz.
 database_id = "00000000-0000-0000-0000-000000000000"
 migrations_dir = "migrations"
 

@@ -1,11 +1,11 @@
 {
-  "name": "povratek",
+  "name": "call-ride",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "db:migrate:local": "wrangler d1 migrations apply povratek --local",
-    "db:migrate:remote": "wrangler d1 migrations apply povratek --remote",
+    "db:migrate:local": "wrangler d1 migrations apply call-ride --local",
+    "db:migrate:remote": "wrangler d1 migrations apply call-ride --remote",
     "deploy": "wrangler deploy",
     "test": "node --test test/*.test.js"
   },
