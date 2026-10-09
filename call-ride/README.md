@@ -1,6 +1,6 @@
 # Call ride
 
-Platforma za prazne povratne vožnje prevoznikov na koridorju **Benetke ↔ Trst ↔ Postojna ↔ Ljubljana**.
+Platforma za prazne povratne vožnje prevoznikov na koridorju **Milano ↔ Verona ↔ Benetke ↔ Trst ↔ Koper ↔ Postojna ↔ Ljubljana**.
 Prevoznik, ki se vrača prazen, objavi vožnjo, potniki na poti pa rezervirajo sedež ali cel kombi.
 
 Tehnologija: en Cloudflare Worker (API + statične datoteke), baza Cloudflare D1, vmesnik v čistem JavaScriptu brez build koraka.
@@ -9,6 +9,10 @@ Tehnologija: en Cloudflare Worker (API + statične datoteke), baza Cloudflare D1
 
 **Potnik**
 - iskanje po koridorju (od, do, datum, število oseb, časovno okno, največja cena), ujemanje tudi z vmesnimi točkami vožnje
+- **iskanje na zemljevidu**: tapni točko (ali »Uporabi mojo lokacijo«), izberi radij 1–50 km — najde vožnje, ki ustavijo na kateri od postaj v radiu
+- časovno okno se primerja z **ocenjenim časom prevzema na potnikovi točki** (vožnja iz Milana ob 7:00 je v Trstu okoli 12:00)
+- **cena odseka**: potnik plača sorazmerni del cene glede na dolžino svojega odseka (zaokroženo na cel evro, najmanj 5 €)
+- **objava iskanja**: če ni ustrezne vožnje, potnik objavi, da išče prevoz; v »Rezervacije« vidi, ko se pojavi ustrezna vožnja
 - rezervacija deljene vožnje ali zasebnega najema celega kombija, številka leta, opomba
 - moje rezervacije: status, dogovorjen čas prevzema, telefon prevoznika po potrditvi, ocena po vožnji
 - **sledenje vozniku v živo**: ko voznik začne vožnjo, potnik vidi predviden prihod na svoj prevzem, zamudo glede na dogovorjen čas in zemljevid; osveževanje vsakih 30 s
@@ -16,8 +20,11 @@ Tehnologija: en Cloudflare Worker (API + statične datoteke), baza Cloudflare D1
 
 **Prevoznik**
 - registracija s podatki za preverbo (matična, davčna, vrsta in številka licence, licenca Skupnosti, veljavnost, vozilo)
-- objava vožnje z vmesnimi točkami, cena na sedež, zasebni najem, največji ovinek
-- potrjevanje/zavračanje rezervacij z dogovorjenim časom prevzema (predlog sistema ali ročno)
+- objava vožnje: kraji ob glavni poti (npr. Milano → Ljubljana: Bergamo, Brescia, Verona, Vicenza, Padova, Mestre, Benetke, Trst, Koper, Sežana, Postojna …) so na poti **samodejno**; ovinke (letališča, središča mest) doda sam
+- **potniki iščejo prevoz**: seznam iskanj na koridorju z oznako »na tvoji poti«, telefon potnika, gumb »Objavi vožnjo« s predizpolnjenim obrazcem; obrazec za novo vožnjo sproti pokaže potnike na izbrani liniji in dan
+- potrditev rezervacije z obrazcem: dogovorjen čas prevzema, vnaprej izpolnjen s predlogom po oceni poti
+- cena na sedež velja za celo pot, zasebni najem, največji ovinek
+- potrjevanje/zavračanje rezervacij
 - **način vožnje v teku**: deli GPS lokacijo iz brskalnika, zaslon ostane prižgan, potniki po vrstnem redu prevzema, gumba Pobran / Ni prišel, navigacija z Google Maps
 - zaključek vožnje, prikaz zaslužka po 12 % proviziji
 
@@ -52,8 +59,10 @@ ob zaključku zajem, ob pozni odpovedi zajem pristojbine.
 
 - Voznik v načinu »Vožnja v teku« pošilja lokacijo vsakih 15–30 s (dokler je stran odprta).
 - Strežnik za vsakega potnika izračuna prihod od voznikove lokacije prek prevzemov drugih potnikov pred njim do njegove točke (+3 min za vsak vmesni postanek). Izračun se osveži največ enkrat na minuto na rezervacijo.
-- Z ključem `GOOGLE_MAPS_API_KEY` se uporabi **Google Routes API s prometom v živo** (`TRAFFIC_AWARE`). Brez ključa aplikacija uporabi oceno (zračna razdalja × 1,3 pri 75 km/h) in to tudi označi.
+- Z ključem `GOOGLE_MAPS_API_KEY` se uporabi **Google Routes API s prometom v živo** (`TRAFFIC_AWARE`). Brez ključa aplikacija uporabi oceno (zračna razdalja med točkami poti × 1,2 pri 90 km/h) in to tudi označi.
 - Z ključem `GOOGLE_MAPS_EMBED_KEY` potnik vidi vgrajen zemljevid poti voznik → prevzem, sicer gumb za odpiranje v Google Maps.
+
+Zemljevid za iskanje je Leaflet z OpenStreetMap (brez ključa); naloži se šele, ko potnik izbere »Na zemljevidu«.
 
 Omejitev spletne aplikacije: brskalnik pošilja lokacijo le, ko je stran odprta. Za zanesljivo sledenje v ozadju bo kasneje potrebna mobilna aplikacija za voznike.
 
@@ -96,7 +105,7 @@ npm test                   # v drugem terminalu: celoten tok prek API-ja
 ```
 src/worker.js         API in usmerjanje
 src/live.js           sledenje, izračun prihoda (Google Routes API), pravila odpovedi
-src/places.js         točke koridorja s koordinatami
+src/places.js         točke koridorja s koordinatami (main: kraj ob glavni poti / ovinek)
 migrations/           shema baze D1
 public/               vmesnik (index.html, app.js, styles.css)
 test/                 testi celotnega toka

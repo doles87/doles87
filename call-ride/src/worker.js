@@ -1,6 +1,6 @@
-import { PLACES, PLACE_SET, PLACE_COORDS } from './places.js';
+import { PLACES, PLACE_SET, PLACE_COORDS, MAIN_PLACES } from './places.js';
 import {
-  policy, nowLocal, nowLocalMs, localToMs, ridePoints, suggestedPickupTime, refreshEta, delayMinutes, cancelTerms,
+  policy, haversineKm, segmentPrice, nowLocal, nowLocalMs, localToMs, msToLocal, ridePoints, suggestedPickupTime, refreshEta, delayMinutes, cancelTerms,
 } from './live.js';
 
 const SESSION_COOKIE = 'pv_session';
@@ -188,6 +188,7 @@ function rideOut(r) {
     origin: r.origin,
     destination: r.destination,
     stops: JSON.parse(r.stops || '[]'),
+    route: ridePoints(r),
     departure_at: r.departure_at,
     seats_total: r.seats_total,
     seats_left: r.seats_left,
@@ -202,41 +203,157 @@ function rideOut(r) {
   };
 }
 
-async function searchRides(env, url) {
-  const q = url.searchParams;
-  const from = place(q.get('from'), 'od');
-  const to = place(q.get('to'), 'do');
-  const date = q.get('date') || '';
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) fail(400, 'Izberi datum.');
-  const seats = int(q.get('seats') || 1, 'potniki', 1, 60);
-  const timeFrom = /^\d{2}:\d{2}$/.test(q.get('time_from') || '') ? q.get('time_from') : '00:00';
-  const timeTo = /^\d{2}:\d{2}$/.test(q.get('time_to') || '') ? q.get('time_to') : '23:59';
-  const maxTotal = q.get('max_total') ? euroToCents(q.get('max_total'), 'največja cena') : null;
+// Iskanje z zemljevida: točke koridorja v radiu od izbrane lokacije, najbližja prva.
+function placesNear(q) {
+  const lat = Number(q.get('lat'));
+  const lng = Number(q.get('lng'));
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) fail(400, 'Neveljavna točka na zemljevidu.');
+  const radius = int(q.get('radius') || 15, 'radij', 1, 200);
+  return PLACES.map((p) => ({ place: p, km: haversineKm([lat, lng], PLACE_COORDS[p]) }))
+    .filter((x) => x.km <= radius)
+    .sort((a, b) => a.km - b.km);
+}
 
-  const lower = `${date}T${timeFrom}`;
+// Prevzem za vožnjo pri iskanju z zemljevida: najbližja točka v radiu, ki je na poti pred izstopom.
+function nearestPickup(ride, near, to) {
+  const points = ridePoints(ride);
+  const b = points.indexOf(to);
+  return near.find((x) => { const a = points.indexOf(x.place); return a !== -1 && a < b; }) || null;
+}
+
+// Vožnje, ki potnika peljejo od (ali iz radija okoli izbrane točke) do cilja na izbrani dan.
+// Časovno okno se primerja z ocenjenim časom prevzema na potnikovi točki, ne z odhodom iz začetka
+// (vožnja iz Milana ob 8:00 pride v Trst okoli 12:00).
+async function findRides(env, { from, near, to, date, timeFrom = '00:00', timeTo = '23:59', seats = 1, maxTotal = null }) {
   const now = nowLocal();
+  const dayBefore = msToLocal(localToMs(`${date}T00:00`) - 86400000);
   const { results } = await env.DB.prepare(
     `${RIDE_SELECT}
      WHERE r.status = 'open' AND c.status = 'approved'
        AND r.departure_at >= ? AND r.departure_at <= ? AND r.departure_at > ?
      ORDER BY r.departure_at`,
-  ).bind(lower > now ? lower : now, `${date}T${timeTo}`, now).all();
+  ).bind(dayBefore, `${date}T${timeTo}`, now).all();
 
-  const rides = results
-    .filter((r) => segmentMatches(r, from, to))
-    .map(rideOut)
+  return results
     .map((r) => {
-      const sharedTotal = r.seats_left >= seats ? r.price_per_seat * seats : null;
+      const pick = near ? nearestPickup(r, near, to) : (segmentMatches(r, from, to) ? { place: from, km: null } : null);
+      if (!pick) return null;
+      const eta = suggestedPickupTime(r, pick.place);
+      if (eta < `${date}T${timeFrom}` || eta > `${date}T${timeTo}`) return null;
+      return {
+        ...rideOut(r),
+        pickup: pick.place,
+        pickup_km: pick.km === null ? null : Math.round(pick.km * 10) / 10,
+        pickup_eta: eta,
+        seat_price: segmentPrice(r, pick.place, to),
+      };
+    })
+    .filter(Boolean)
+    .map((r) => {
+      const sharedTotal = r.seats_left >= seats ? r.seat_price * seats : null;
       const privateTotal = r.private_available && r.seats_total >= seats ? r.private_price : null;
       return { ...r, shared_total: sharedTotal, private_total: privateTotal };
     })
     .filter((r) => r.shared_total !== null || r.private_total !== null)
     .filter((r) => maxTotal === null || Math.min(r.shared_total ?? Infinity, r.private_total ?? Infinity) <= maxTotal)
     .sort((a, b) => (a.shared_total ?? a.private_total) - (b.shared_total ?? b.private_total));
-
-  return json({ rides });
 }
 
+const TIME_RE = /^\d{2}:\d{2}$/;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+async function searchRides(env, url) {
+  const q = url.searchParams;
+  const near = q.has('lat') ? placesNear(q) : null;
+  const date = q.get('date') || '';
+  if (!DATE_RE.test(date)) fail(400, 'Izberi datum.');
+  const rides = await findRides(env, {
+    near,
+    from: near ? null : place(q.get('from'), 'od'),
+    to: place(q.get('to'), 'do'),
+    date,
+    seats: int(q.get('seats') || 1, 'potniki', 1, 60),
+    timeFrom: TIME_RE.test(q.get('time_from') || '') ? q.get('time_from') : '00:00',
+    timeTo: TIME_RE.test(q.get('time_to') || '') ? q.get('time_to') : '23:59',
+    maxTotal: q.get('max_total') ? euroToCents(q.get('max_total'), 'največja cena') : null,
+  });
+  return json({ rides, near: near && near.map((x) => ({ place: x.place, km: Math.round(x.km * 10) / 10 })) });
+}
+
+// Cene sedeža za vse odseke vožnje (ključ "i-j" po indeksih v route), za izračun na strani rezervacije.
+function segmentPrices(r) {
+  const pts = ridePoints(r);
+  const out = {};
+  for (let i = 0; i < pts.length - 1; i++) for (let j = i + 1; j < pts.length; j++) out[`${i}-${j}`] = segmentPrice(r, pts[i], pts[j]);
+  return out;
+}
+
+// ---------- iskanja potnikov (potnik objavi, da išče prevoz; prevozniki jih vidijo na svoji liniji) ----------
+
+function requestOut(q) {
+  return {
+    id: q.id, origin: q.origin, destination: q.destination, date: q.date, time_from: q.time_from, time_to: q.time_to,
+    seats: q.seats, note: q.note, status: q.status, created_at: q.created_at,
+  };
+}
+
+async function createRequest(env, user, body) {
+  const origin = place(body.origin, 'od');
+  const destination = place(body.destination, 'do');
+  if (origin === destination) fail(400, 'Začetek in cilj morata biti različna.');
+  const date = str(body.date, 'datum', { max: 10 });
+  if (!DATE_RE.test(date) || date < nowLocal().slice(0, 10)) fail(400, 'Izberi današnji ali kasnejši datum.');
+  const timeFrom = TIME_RE.test(body.time_from || '') ? body.time_from : '00:00';
+  const timeTo = TIME_RE.test(body.time_to || '') ? body.time_to : '23:59';
+  if (timeFrom > timeTo) fail(400, 'Časovno okno ni veljavno.');
+  const seats = int(body.seats ?? 1, 'potniki', 1, 60);
+  const note = str(body.note, 'opomba', { required: false, max: 300 });
+  const open = await env.DB.prepare(`SELECT COUNT(*) AS n FROM ride_requests WHERE passenger_id = ? AND status = 'open' AND date >= ?`)
+    .bind(user.id, nowLocal().slice(0, 10)).first();
+  if (open.n >= 10) fail(400, 'Imaš že 10 odprtih iskanj. Zapri katero od njih.');
+  const res = await env.DB.prepare(
+    `INSERT INTO ride_requests (passenger_id, origin, destination, date, time_from, time_to, seats, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(user.id, origin, destination, date, timeFrom, timeTo, seats, note).run();
+  return json({ id: res.meta.last_row_id }, 201);
+}
+
+async function myRequests(env, user) {
+  const { results } = await env.DB.prepare(
+    `SELECT * FROM ride_requests WHERE passenger_id = ? AND status = 'open' AND date >= ? ORDER BY date, time_from`,
+  ).bind(user.id, nowLocal().slice(0, 10)).all();
+  const requests = [];
+  for (const q of results) {
+    const rides = await findRides(env, { from: q.origin, to: q.destination, date: q.date, timeFrom: q.time_from, timeTo: q.time_to, seats: q.seats });
+    requests.push({ ...requestOut(q), matches: rides.length });
+  }
+  return json({ requests });
+}
+
+// Odprta iskanja potnikov na koridorju; pri vsakem vožnje tega prevoznika, ki ga lahko peljejo.
+async function carrierRequests(env, user) {
+  const carrier = await env.DB.prepare('SELECT status FROM carriers WHERE user_id = ?').bind(user.id).first();
+  if (carrier?.status !== 'approved') return json({ requests: [] });
+  const today = nowLocal().slice(0, 10);
+  const [{ results: reqs }, { results: rides }] = await env.DB.batch([
+    env.DB.prepare(
+      `SELECT q.*, u.name AS passenger_name, u.phone AS passenger_phone FROM ride_requests q JOIN users u ON u.id = q.passenger_id
+       WHERE q.status = 'open' AND q.date >= ? ORDER BY q.date, q.time_from LIMIT 200`,
+    ).bind(today),
+    env.DB.prepare(`SELECT * FROM rides WHERE carrier_id = ? AND status = 'open' AND departure_at >= ?`).bind(user.id, `${today}T00:00`),
+  ]);
+  const requests = reqs.map((q) => ({
+    ...requestOut(q),
+    passenger_name: q.passenger_name,
+    passenger_phone: q.passenger_phone,
+    rides: rides.filter((r) => {
+      if (!segmentMatches(r, q.origin, q.destination)) return false;
+      const eta = suggestedPickupTime(r, q.origin);
+      return eta >= `${q.date}T${q.time_from}` && eta <= `${q.date}T${q.time_to}`;
+    }).map((r) => r.id),
+  }));
+  requests.sort((a, b) => (b.rides.length > 0) - (a.rides.length > 0));
+  return json({ requests });
+}
 async function getRide(env, id) {
   const r = await env.DB.prepare(`${RIDE_SELECT} WHERE r.id = ?`).bind(id).first();
   if (!r) fail(404, 'Vožnja ne obstaja.');
@@ -252,6 +369,8 @@ async function createRide(env, user, body) {
   if (origin === destination) fail(400, 'Začetek in cilj morata biti različna.');
   const stops = Array.isArray(body.stops) ? body.stops.map((s) => place(s, 'vmesna točka')) : [];
   if (new Set([origin, destination, ...stops]).size !== stops.length + 2) fail(400, 'Točke na poti se ne smejo ponavljati.');
+  const [lo, hi] = [PLACES.indexOf(origin), PLACES.indexOf(destination)].sort((x, y) => x - y);
+  if (stops.some((p) => PLACES.indexOf(p) < lo || PLACES.indexOf(p) > hi)) fail(400, 'Vmesne točke morajo biti med začetkom in ciljem.');
 
   const departure = str(body.departure_at, 'odhod', { max: 16 });
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(departure)) fail(400, 'Neveljaven čas odhoda.');
@@ -348,7 +467,7 @@ async function createBooking(env, user, body) {
     total = ride.private_price;
     capacityCheck = `NOT EXISTS (SELECT 1 FROM bookings WHERE ride_id = ? AND status IN ${ACTIVE_BOOKING})`;
   } else {
-    total = ride.price_per_seat * seats;
+    total = segmentPrice(ride, pickup, dropoff) * seats;
     capacityCheck = `(SELECT seats_total FROM rides WHERE id = ?) - COALESCE((SELECT SUM(seats) FROM bookings WHERE ride_id = ? AND status IN ${ACTIVE_BOOKING}), 0) >= ${seats}`;
   }
   const flight = str(body.flight_number, 'številka leta', { required: false, max: 12 });
@@ -589,7 +708,7 @@ async function handleApi(request, env, url) {
   const user = await currentUser(env, request);
   let m;
 
-  if (path === '/places' && method === 'GET') return json({ places: PLACES });
+  if (path === '/places' && method === 'GET') return json({ places: PLACES, coords: PLACE_COORDS, main: [...MAIN_PLACES] });
 
   if (path === '/config' && method === 'GET') {
     // Ključ za Maps Embed API je javen (omejen na domeno v Google Cloud), ključ za Routes API ostane na strežniku.
@@ -670,7 +789,7 @@ async function handleApi(request, env, url) {
   if ((m = path.match(/^\/rides\/(\d+)$/)) && method === 'GET') {
     const ride = await getRide(env, Number(m[1]));
     if (ride.status !== 'open' && !user) fail(404, 'Vožnja ne obstaja.');
-    return json({ ride: rideOut(ride) });
+    return json({ ride: { ...rideOut(ride), segment_prices: segmentPrices(ride) } });
   }
 
   if (path === '/rides' && method === 'POST') {
@@ -721,6 +840,28 @@ async function handleApi(request, env, url) {
   if ((m = path.match(/^\/bookings\/(\d+)\/(confirm|reject|no_show|picked_up)$/)) && method === 'POST') {
     requireRole(user, 'carrier');
     return carrierBookingAction(env, user, Number(m[1]), m[2], await readBody(request));
+  }
+
+  if (path === '/requests' && method === 'POST') {
+    requireRole(user, 'passenger', 'admin');
+    return createRequest(env, user, await readBody(request));
+  }
+
+  if (path === '/requests/mine' && method === 'GET') {
+    requireRole(user);
+    return myRequests(env, user);
+  }
+
+  if ((m = path.match(/^\/requests\/(\d+)\/close$/)) && method === 'POST') {
+    requireRole(user);
+    const res = await env.DB.prepare(`UPDATE ride_requests SET status = 'closed' WHERE id = ? AND passenger_id = ?`).bind(Number(m[1]), user.id).run();
+    if (!res.meta.changes) fail(404, 'Iskanje ne obstaja.');
+    return json({ ok: true });
+  }
+
+  if (path === '/carrier/requests' && method === 'GET') {
+    requireRole(user, 'carrier');
+    return carrierRequests(env, user);
   }
 
   if (path === '/admin/overview' && method === 'GET') {

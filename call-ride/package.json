@@ -7,7 +7,7 @@
     "db:migrate:local": "wrangler d1 migrations apply call-ride --local",
     "db:migrate:remote": "wrangler d1 migrations apply call-ride --remote",
     "deploy": "wrangler deploy",
-    "test": "node --test test/*.test.js"
+    "test": "node --test --test-concurrency=1 test/*.test.js"
   },
   "devDependencies": {
     "wrangler": "4.149.0"

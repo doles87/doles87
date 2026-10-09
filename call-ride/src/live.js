@@ -1,5 +1,5 @@
 // Sledenje vozniku, izračun prihoda (ETA) in pravila odpovedi.
-import { PLACE_COORDS } from './places.js';
+import { PLACES, PLACE_SET, PLACE_COORDS, MAIN_PLACES } from './places.js';
 
 // Pravila odpovedi; vrednosti lahko prepišeš s spremenljivkami okolja (wrangler.toml [vars]).
 export function policy(env) {
@@ -31,18 +31,18 @@ export const nowLocalMs = () => localToMs(nowLocal()) + (Date.now() % 60000);
 
 const utcSqlToMs = (s) => Date.parse(`${s.replace(' ', 'T')}Z`);
 
-function haversineKm([lat1, lng1], [lat2, lng2]) {
+export function haversineKm([lat1, lng1], [lat2, lng2]) {
   const rad = Math.PI / 180;
   const a = Math.sin(((lat2 - lat1) * rad) / 2) ** 2
     + Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(((lng2 - lng1) * rad) / 2) ** 2;
   return 12742 * Math.asin(Math.sqrt(a));
 }
 
-// Groba ocena brez prometa: zračna razdalja × 1,3 pri povprečno 75 km/h.
+// Groba ocena brez prometa: zračna razdalja med točkami poti × 1,2 pri povprečno 90 km/h (avtocesta).
 export function estimateSeconds(coords) {
   let km = 0;
   for (let i = 1; i < coords.length; i++) km += haversineKm(coords[i - 1], coords[i]);
-  return Math.round(((km * 1.3) / 75) * 3600);
+  return Math.round(((km * 1.2) / 90) * 3600);
 }
 
 const STOP_DWELL_S = 180; // čas za pobiranje na vsakem vmesnem postanku
@@ -71,15 +71,47 @@ async function googleSeconds(env, coords) {
   return parseInt(duration, 10);
 }
 
+export const explicitStops = (ride) => JSON.parse(ride.stops || '[]');
+
+// Celotna pot vožnje v smeri vožnje: začetek, kraji ob glavni poti med začetkom in ciljem,
+// izrecno dodane vmesne točke (tudi ovinki) in cilj. Vožnja Milano → Ljubljana tako pokrije
+// tudi Verono, Benetke, Trst, Koper, Postojno …, ne da bi jih prevoznik moral naštevati.
 export function ridePoints(ride) {
-  return [ride.origin, ...JSON.parse(ride.stops || '[]'), ride.destination];
+  const a = PLACES.indexOf(ride.origin);
+  const b = PLACES.indexOf(ride.destination);
+  const dir = a < b ? 1 : -1;
+  const inside = new Set(explicitStops(ride));
+  for (let i = a + dir; i !== b; i += dir) if (MAIN_PLACES.has(PLACES[i])) inside.add(PLACES[i]);
+  const middle = [...inside].filter((p) => PLACE_SET.has(p) && p !== ride.origin && p !== ride.destination).sort((x, y) => (PLACES.indexOf(x) - PLACES.indexOf(y)) * dir);
+  return [ride.origin, ...middle, ride.destination];
+}
+
+function routeKm(points) {
+  let km = 0;
+  for (let i = 1; i < points.length; i++) km += haversineKm(PLACE_COORDS[points[i - 1]], PLACE_COORDS[points[i]]);
+  return km;
+}
+
+// Cena sedeža za odsek: sorazmerno z dolžino odseka glede na celotno pot,
+// zaokroženo navzgor na cel evro, najmanj 5 € (oz. polna cena, če je nižja).
+export function segmentPrice(ride, pickup, dropoff) {
+  const pts = ridePoints(ride);
+  const a = pts.indexOf(pickup);
+  const b = pts.indexOf(dropoff);
+  if (a === 0 && b === pts.length - 1) return ride.price_per_seat;
+  const share = routeKm(pts.slice(a, b + 1)) / routeKm(pts);
+  const cents = Math.ceil((ride.price_per_seat * share) / 100) * 100;
+  return Math.min(ride.price_per_seat, Math.max(cents, 500));
 }
 
 // Predlagan čas prevzema ob potrditvi: odhod + ocena vožnje od začetka do točke prevzema, zaokroženo na 5 min.
 export function suggestedPickupTime(ride, pickup) {
   const pts = ridePoints(ride);
-  const coords = pts.slice(0, pts.indexOf(pickup) + 1).map((p) => PLACE_COORDS[p]);
-  const stops = Math.max(0, coords.length - 2);
+  const before = pts.slice(0, pts.indexOf(pickup) + 1);
+  const coords = before.map((p) => PLACE_COORDS[p]);
+  // Postanek se šteje le na izrecno dodanih točkah (kraji ob poti so le prevoženi).
+  const explicit = new Set(explicitStops(ride));
+  const stops = before.slice(1, -1).filter((p) => explicit.has(p)).length;
   const secs = coords.length > 1 ? estimateSeconds(coords) + stops * STOP_DWELL_S : 0;
   const ms = localToMs(ride.departure_at) + Math.ceil(secs / 300) * 300000;
   return msToLocal(ms);

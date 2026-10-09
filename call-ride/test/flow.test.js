@@ -79,17 +79,21 @@ test('celoten tok: registracija, preverba, objava, iskanje, rezervacija, zaklju�
   r = await passenger(`/rides/search?${new URLSearchParams({ from: TRST, to: POSTOJNA, date, seats: 2 })}`);
   const found = r.data.rides.find((x) => x.id === rideId);
   assert.ok(found, 'vožnja se mora ujemati');
-  assert.equal(found.shared_total, 4400);
+  // Odsek Trst → Postojna stane sorazmerno manj kot cela pot (22 € / sedež), a najmanj 5 €.
+  assert.ok(found.seat_price >= 500 && found.seat_price < 2200, `cena odseka ${found.seat_price}`);
+  assert.equal(found.shared_total, found.seat_price * 2);
   assert.equal(found.private_total, 9000);
+  r = await passenger(`/rides/search?${new URLSearchParams({ from: VCE, to: LJ, date, seats: 2 })}`);
+  assert.equal(r.data.rides.find((x) => x.id === rideId).shared_total, 4400, 'cela pot = polna cena');
   r = await passenger(`/rides/search?${new URLSearchParams({ from: POSTOJNA, to: TRST, date, seats: 2 })}`);
   assert.ok(!r.data.rides.some((x) => x.id === rideId), 'napačna smer se ne sme ujemati');
-  r = await passenger(`/rides/search?${new URLSearchParams({ from: TRST, to: POSTOJNA, date, seats: 2, max_total: 40 })}`);
+  r = await passenger(`/rides/search?${new URLSearchParams({ from: TRST, to: POSTOJNA, date, seats: 2, max_total: 10 })}`);
   assert.ok(!r.data.rides.some((x) => x.id === rideId), 'filter največje cene');
 
   // Rezervacija 3 sedežev, nato druga za 2 sedeža (preveč) mora pasti.
   r = await passenger('/bookings', { method: 'POST', body: { ride_id: rideId, pickup: TRST, dropoff: POSTOJNA, seats: 3, kind: 'shared', flight_number: 'FR1834' } });
   assert.equal(r.status, 201, JSON.stringify(r.data));
-  assert.equal(r.data.total, 6600);
+  assert.equal(r.data.total, found.seat_price * 3, "3 sedeži po ceni odseka");
   const bookingId = r.data.id;
 
   await other('/auth/register', { method: 'POST', body: { email: `o${run}@test.si`, password: 'geslo1234', name: 'Marko' } });
@@ -122,7 +126,7 @@ test('celoten tok: registracija, preverba, objava, iskanje, rezervacija, zaklju�
 
   const ov = (await admin('/admin/overview')).data;
   assert.ok(ov.stats.rides_completed >= 1);
-  assert.ok(ov.stats.commission_completed >= Math.round(6600 * 0.12));
+  assert.ok(ov.stats.commission_completed >= Math.round(found.seat_price * 3 * 0.12));
 
   r = await other('/feedback', { method: 'POST', body: { message: 'Test povratnih informacij', page: '#/' } });
   assert.equal(r.status, 201);

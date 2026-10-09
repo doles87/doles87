@@ -120,7 +120,7 @@ test('sledenje vozniku, zamuda in pristojbine za odpoved', async () => {
   assert.equal(r.data.cancel.reason, 'Voznik je že na poti.');
   r = await ana(`/bookings/${anaId}/cancel`, { method: 'POST', body: {} });
   assert.equal(r.data.fee, 400);
-  assert.equal(r.data.refund, 1800);
+  assert.equal(r.data.refund + r.data.fee, (await ana('/bookings/mine')).data.bookings.find((b) => b.id === anaId).total);
 
   const ov = (await admin('/admin/overview')).data;
   assert.ok(ov.stats.cancel_fees >= 400);

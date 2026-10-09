@@ -120,12 +120,17 @@ h2 { margin: 6px 0 0; font-size: 15px; font-weight: 600; color: var(--muted); }
 .pill.gray { background: #ECEDEA; color: var(--muted); }
 .chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #BFD9D3; background: #fff; color: var(--teal); font-weight: 700; font-size: 12.5px; border-radius: 999px; padding: 7px 12px; }
 .chip[aria-pressed="true"] { background: var(--teal-soft); border-color: var(--teal-soft); }
+.chip.auto { background: var(--teal-soft); border-color: var(--teal-soft); font-weight: 600; cursor: default; }
+.map-box { position: relative; border-radius: 14px; overflow: hidden; border: 1px solid var(--line); background: #E8EBE5; }
+#map { height: 320px; z-index: 0; }
+.map-hint { position: absolute; left: 10px; right: 10px; bottom: 10px; z-index: 500; margin: 0; background: rgba(22,28,40,.88); color: #fff; font-size: 13px; padding: 8px 12px; border-radius: 10px; pointer-events: none; text-align: center; }
+.field input.range { appearance: auto; -webkit-appearance: auto; width: 100%; accent-color: var(--amber); margin: 8px 0 4px; padding: 0; }
 
 /* ---------- koridor ---------- */
 .corridor { position: relative; padding: 10px 8px 2px; }
 .corridor::before { content: ''; position: absolute; left: 22px; right: 22px; top: 15px; height: 2px; background: #D7DAD3; }
 .corridor ol { position: relative; display: flex; justify-content: space-between; list-style: none; margin: 0; padding: 0; }
-.corridor li { display: flex; flex-direction: column; align-items: center; gap: 7px; font-size: 11px; color: var(--muted); }
+.corridor li { display: flex; flex-direction: column; align-items: center; gap: 7px; font-size: 10.5px; color: var(--muted); }
 .corridor li i { width: 9px; height: 9px; border-radius: 999px; background: var(--navy); display: block; margin-top: 1px; }
 .corridor li.on { color: var(--ink); font-weight: 600; }
 .corridor li.on i { width: 11px; height: 11px; margin-top: 0; background: var(--amber); box-shadow: 0 0 0 3px var(--amber-soft); }
