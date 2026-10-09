@@ -12,7 +12,7 @@ run_worker_first = ["/api/*"]
 binding = "DB"
 database_name = "call-ride"
 # Po `npx wrangler d1 create call-ride` sem prilepi database_id, ki ga izpiše ukaz.
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "d139b6a4-36fd-464b-8459-26d1933110b1"
 migrations_dir = "migrations"
 
 # ADMIN_EMAILS (e-naslovi, ki ob registraciji dobijo vlogo admin, ločeni z vejico)
