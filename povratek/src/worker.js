@@ -1,4 +1,7 @@
-import { PLACES, PLACE_SET } from './places.js';
+import { PLACES, PLACE_SET, PLACE_COORDS } from './places.js';
+import {
+  policy, nowLocal, nowLocalMs, localToMs, ridePoints, suggestedPickupTime, refreshEta, delayMinutes, cancelTerms,
+} from './live.js';
 
 const SESSION_COOKIE = 'pv_session';
 const SESSION_DAYS = 30;
@@ -65,18 +68,6 @@ function place(value, field) {
   const v = str(value, field);
   if (!PLACE_SET.has(v)) fail(400, `Neznana lokacija: ${v}`);
   return v;
-}
-
-// Trenutni lokalni čas v Sloveniji kot "YYYY-MM-DDTHH:MM" (enak format kot departure_at).
-function nowLocal() {
-  const parts = Object.fromEntries(
-    new Intl.DateTimeFormat('en-GB', {
-      timeZone: 'Europe/Ljubljana',
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
-    }).formatToParts(new Date()).map((p) => [p.type, p.value]),
-  );
-  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
 }
 
 const b64 = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes)));
@@ -170,10 +161,6 @@ function carrierFields(input) {
 
 // ---------- vožnje ----------
 
-function ridePoints(ride) {
-  return [ride.origin, ...JSON.parse(ride.stops || '[]'), ride.destination];
-}
-
 // Vožnja ustreza, če sta obe točki na njeni poti in je prevzem pred izstopom.
 function segmentMatches(ride, from, to) {
   const points = ridePoints(ride);
@@ -211,6 +198,7 @@ function rideOut(r) {
     max_detour_min: r.max_detour_min,
     note: r.note,
     status: r.status,
+    started_at: r.started_at,
   };
 }
 
@@ -314,7 +302,10 @@ async function cancelRide(env, user, id) {
   if (ride.status !== 'open') fail(400, 'Vožnja ni več odprta.');
   await env.DB.batch([
     env.DB.prepare(`UPDATE rides SET status = 'cancelled' WHERE id = ?`).bind(id),
-    env.DB.prepare(`UPDATE bookings SET status = 'cancelled' WHERE ride_id = ? AND status IN ('pending','confirmed')`).bind(id),
+    env.DB.prepare(
+      `UPDATE bookings SET status = 'cancelled', cancel_fee = 0, cancelled_at = ?, cancel_reason = 'Prevoznik je odpovedal vožnjo.'
+       WHERE ride_id = ? AND status IN ('pending','confirmed')`,
+    ).bind(nowLocal(), id),
   ]);
   return json({ ok: true });
 }
@@ -372,7 +363,7 @@ async function createBooking(env, user, body) {
 
 async function myBookings(env, user) {
   const { results } = await env.DB.prepare(
-    `SELECT b.*, r.departure_at, r.origin, r.destination, r.status AS ride_status,
+    `SELECT b.*, r.departure_at, r.origin, r.destination, r.status AS ride_status, r.started_at,
        c.company_name, cu.phone AS carrier_phone
      FROM bookings b JOIN rides r ON r.id = b.ride_id
      JOIN carriers c ON c.user_id = r.carrier_id JOIN users cu ON cu.id = r.carrier_id
@@ -383,13 +374,14 @@ async function myBookings(env, user) {
     bookings: results.map((b) => ({
       ...b,
       carrier_phone: ['confirmed', 'completed'].includes(b.status) ? b.carrier_phone : null,
+      delay_min: delayMinutes(b),
     })),
   });
 }
 
 async function bookingWithRide(env, id) {
   const b = await env.DB.prepare(
-    `SELECT b.*, r.carrier_id, r.departure_at, r.status AS ride_status FROM bookings b JOIN rides r ON r.id = b.ride_id WHERE b.id = ?`,
+    `SELECT b.*, r.carrier_id, r.departure_at, r.status AS ride_status, r.started_at FROM bookings b JOIN rides r ON r.id = b.ride_id WHERE b.id = ?`,
   ).bind(id).first();
   if (!b) fail(404, 'Rezervacija ne obstaja.');
   return b;
@@ -407,8 +399,16 @@ async function passengerBookingAction(env, user, id, action, body) {
   const b = await bookingWithRide(env, id);
   if (b.passenger_id !== user.id) fail(404, 'Rezervacija ne obstaja.');
   if (action === 'cancel') {
-    if (b.departure_at <= nowLocal()) fail(400, 'Vožnja se je že začela.');
-    return setBookingStatus(env, id, ['pending', 'confirmed'], 'cancelled');
+    if (!['pending', 'confirmed'].includes(b.status)) fail(409, 'Rezervacije ni več mogoče odpovedati.');
+    if (b.picked_up_at) fail(400, 'Vožnja s to rezervacijo je že v teku.');
+    const ride = await env.DB.prepare('SELECT * FROM rides WHERE id = ?').bind(b.ride_id).first();
+    const terms = cancelTerms(env, b, ride);
+    const res = await env.DB.prepare(
+      `UPDATE bookings SET status = 'cancelled', cancel_fee = ?, cancelled_at = ?, cancel_reason = ?
+       WHERE id = ? AND status IN ('pending','confirmed')`,
+    ).bind(terms.fee, nowLocal(), `Potnik: ${terms.reason}`, id).run();
+    if (!res.meta.changes) fail(409, 'Rezervacije ni več mogoče odpovedati.');
+    return json({ ok: true, ...terms });
   }
   if (action === 'rate') {
     if (b.status !== 'completed') fail(400, 'Oceniš lahko le zaključeno vožnjo.');
@@ -420,14 +420,102 @@ async function passengerBookingAction(env, user, id, action, body) {
   fail(404, 'Neznana akcija.');
 }
 
-async function carrierBookingAction(env, user, id, action) {
+async function carrierBookingAction(env, user, id, action, body) {
   const b = await bookingWithRide(env, id);
   if (b.carrier_id !== user.id) fail(404, 'Rezervacija ne obstaja.');
   if (b.ride_status !== 'open') fail(400, 'Vožnja ni več odprta.');
-  if (action === 'confirm') return setBookingStatus(env, id, ['pending'], 'confirmed');
+  const ride = await env.DB.prepare('SELECT * FROM rides WHERE id = ?').bind(b.ride_id).first();
+
+  if (action === 'confirm') {
+    // Dogovorjen čas prevzema: "HH:MM" od prevoznika ali predlog iz ocene poti.
+    let pickupTime = suggestedPickupTime(ride, b.pickup);
+    if (body.pickup_time) {
+      if (!/^\d{2}:\d{2}$/.test(body.pickup_time)) fail(400, 'Čas prevzema mora biti v obliki HH:MM.');
+      pickupTime = `${ride.departure_at.slice(0, 10)}T${body.pickup_time}`;
+      if (pickupTime < ride.departure_at) {
+        // Prevzem po polnoči (npr. odhod 23:00, prevzem 00:40) pade na naslednji dan.
+        if (localToMs(ride.departure_at) - localToMs(pickupTime) < 12 * 3600000) fail(400, 'Prevzem ne more biti pred odhodom vožnje.');
+        pickupTime = new Date(localToMs(pickupTime) + 86400000).toISOString().slice(0, 16);
+      }
+    }
+    const res = await env.DB.prepare(
+      `UPDATE bookings SET status = 'confirmed', confirmed_at = ?, pickup_time = ? WHERE id = ? AND status = 'pending'`,
+    ).bind(nowLocal(), pickupTime, id).run();
+    if (!res.meta.changes) fail(409, 'Statusa rezervacije ni mogoče spremeniti.');
+    return json({ ok: true, pickup_time: pickupTime });
+  }
   if (action === 'reject') return setBookingStatus(env, id, ['pending'], 'rejected');
-  if (action === 'no_show') return setBookingStatus(env, id, ['confirmed'], 'no_show');
+  if (action === 'picked_up') {
+    const res = await env.DB.prepare(
+      `UPDATE bookings SET picked_up_at = ? WHERE id = ? AND status = 'confirmed' AND picked_up_at IS NULL`,
+    ).bind(nowLocal(), id).run();
+    if (!res.meta.changes) fail(409, 'Potnik je že označen kot pobran.');
+    return json({ ok: true });
+  }
+  if (action === 'no_show') {
+    const p = policy(env);
+    const pickupMs = localToMs(b.pickup_time || ride.departure_at);
+    if (nowLocalMs() < pickupMs + p.no_show_wait_min * 60000) {
+      fail(400, `Neprihod lahko označiš šele ${p.no_show_wait_min} min po dogovorjenem času prevzema.`);
+    }
+    if (b.picked_up_at) fail(400, 'Potnik je že pobran.');
+    const fee = Math.min(p.cancel_fee, b.total);
+    const res = await env.DB.prepare(
+      `UPDATE bookings SET status = 'no_show', cancel_fee = ?, cancelled_at = ?, cancel_reason = 'Potnik ni prišel na prevzem.'
+       WHERE id = ? AND status = 'confirmed'`,
+    ).bind(fee, nowLocal(), id).run();
+    if (!res.meta.changes) fail(409, 'Statusa rezervacije ni mogoče spremeniti.');
+    return json({ ok: true, fee });
+  }
   fail(404, 'Neznana akcija.');
+}
+
+// ---------- sledenje v živo ----------
+
+async function startRide(env, user, id) {
+  const ride = await ownRide(env, user, id);
+  if (ride.status !== 'open') fail(400, 'Vožnja ni več odprta.');
+  if (localToMs(ride.departure_at) - nowLocalMs() > 3 * 3600000) fail(400, 'Vožnjo lahko začneš največ 3 ure pred odhodom.');
+  if (!ride.started_at) await env.DB.prepare('UPDATE rides SET started_at = ? WHERE id = ?').bind(nowLocal(), id).run();
+  return json({ ok: true });
+}
+
+async function updateLocation(env, user, id, body) {
+  const ride = await ownRide(env, user, id);
+  if (ride.status !== 'open' || !ride.started_at) fail(400, 'Vožnja ni v teku.');
+  const lat = Number(body.lat);
+  const lng = Number(body.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) fail(400, 'Neveljavna lokacija.');
+  await env.DB.prepare('UPDATE rides SET driver_lat = ?, driver_lng = ?, driver_pos_ms = ? WHERE id = ?')
+    .bind(lat, lng, Date.now(), id).run();
+  return json({ ok: true });
+}
+
+async function bookingLive(env, user, id) {
+  const b = await env.DB.prepare('SELECT * FROM bookings WHERE id = ?').bind(id).first();
+  if (!b) fail(404, 'Rezervacija ne obstaja.');
+  const ride = await env.DB.prepare('SELECT * FROM rides WHERE id = ?').bind(b.ride_id).first();
+  if (b.passenger_id !== user.id && ride.carrier_id !== user.id && user.role !== 'admin') fail(404, 'Rezervacija ne obstaja.');
+
+  const fresh = await refreshEta(env, ride, b);
+  const hasPos = ride.driver_pos_ms !== null && ride.driver_pos_ms !== undefined;
+  const tracking = !!ride.started_at && ride.status === 'open' && fresh.status === 'confirmed' && !fresh.picked_up_at;
+  return json({
+    status: fresh.status,
+    started: !!ride.started_at,
+    picked_up: !!fresh.picked_up_at,
+    pickup: { name: fresh.pickup, coords: PLACE_COORDS[fresh.pickup] },
+    pickup_time: fresh.pickup_time,
+    driver: tracking && hasPos
+      ? { lat: ride.driver_lat, lng: ride.driver_lng, age_s: Math.round((Date.now() - ride.driver_pos_ms) / 1000) }
+      : null,
+    eta_at: tracking ? fresh.eta_at : null,
+    eta_in_min: tracking && fresh.eta_at ? Math.max(0, Math.round((localToMs(fresh.eta_at) - nowLocalMs()) / 60000)) : null,
+    eta_source: tracking ? fresh.eta_source : null,
+    delay_min: tracking ? delayMinutes(fresh) : 0,
+    late_threshold_min: policy(env).late_min,
+    cancel: ['pending', 'confirmed'].includes(fresh.status) && !fresh.picked_up_at ? cancelTerms(env, fresh, ride) : null,
+  });
 }
 
 // ---------- admin ----------
@@ -446,14 +534,17 @@ async function adminOverview(env) {
          (SELECT COUNT(*) FROM bookings) AS bookings,
          (SELECT COALESCE(SUM(total), 0) FROM bookings WHERE status = 'completed') AS revenue_completed,
          (SELECT COALESCE(SUM(seats), 0) FROM bookings WHERE status IN ('confirmed','completed')) AS seats_sold,
-         (SELECT COALESCE(SUM(seats_total), 0) FROM rides WHERE status IN ('open','completed')) AS seats_offered`,
+         (SELECT COALESCE(SUM(seats_total), 0) FROM rides WHERE status IN ('open','completed')) AS seats_offered,
+         (SELECT COALESCE(SUM(cancel_fee), 0) FROM bookings) AS cancel_fees,
+         (SELECT COUNT(*) FROM bookings WHERE cancel_fee > 0) AS cancel_fee_count`,
     ).bind(now),
     env.DB.prepare(
       `SELECT c.*, u.name, u.email, u.phone FROM carriers c JOIN users u ON u.id = c.user_id
        ORDER BY (c.status = 'pending') DESC, c.created_at DESC`,
     ),
     env.DB.prepare(
-      `SELECT b.id, b.pickup, b.dropoff, b.seats, b.kind, b.total, b.status, b.created_at, r.departure_at,
+      `SELECT b.id, b.pickup, b.dropoff, b.seats, b.kind, b.total, b.status, b.created_at, b.cancel_fee, b.cancel_reason,
+         b.pickup_time, r.departure_at,
          c.company_name, u.name AS passenger_name
        FROM bookings b JOIN rides r ON r.id = b.ride_id JOIN carriers c ON c.user_id = r.carrier_id
        JOIN users u ON u.id = b.passenger_id ORDER BY b.created_at DESC LIMIT 50`,
@@ -495,6 +586,11 @@ async function handleApi(request, env, url) {
   let m;
 
   if (path === '/places' && method === 'GET') return json({ places: PLACES });
+
+  if (path === '/config' && method === 'GET') {
+    // Ključ za Maps Embed API je javen (omejen na domeno v Google Cloud), ključ za Routes API ostane na strežniku.
+    return json({ policy: policy(env), maps_embed_key: env.GOOGLE_MAPS_EMBED_KEY || null, live_traffic: !!env.GOOGLE_MAPS_API_KEY });
+  }
 
   if (path === '/auth/register' && method === 'POST') {
     const body = await readBody(request);
@@ -588,6 +684,21 @@ async function handleApi(request, env, url) {
     return m[2] === 'cancel' ? cancelRide(env, user, Number(m[1])) : completeRide(env, user, Number(m[1]));
   }
 
+  if ((m = path.match(/^\/rides\/(\d+)\/start$/)) && method === 'POST') {
+    requireRole(user, 'carrier');
+    return startRide(env, user, Number(m[1]));
+  }
+
+  if ((m = path.match(/^\/rides\/(\d+)\/location$/)) && method === 'POST') {
+    requireRole(user, 'carrier');
+    return updateLocation(env, user, Number(m[1]), await readBody(request));
+  }
+
+  if ((m = path.match(/^\/bookings\/(\d+)\/live$/)) && method === 'GET') {
+    requireRole(user);
+    return bookingLive(env, user, Number(m[1]));
+  }
+
   if (path === '/bookings' && method === 'POST') {
     requireRole(user, 'passenger', 'admin');
     return createBooking(env, user, await readBody(request));
@@ -603,9 +714,9 @@ async function handleApi(request, env, url) {
     return passengerBookingAction(env, user, Number(m[1]), m[2], await readBody(request));
   }
 
-  if ((m = path.match(/^\/bookings\/(\d+)\/(confirm|reject|no_show)$/)) && method === 'POST') {
+  if ((m = path.match(/^\/bookings\/(\d+)\/(confirm|reject|no_show|picked_up)$/)) && method === 'POST') {
     requireRole(user, 'carrier');
-    return carrierBookingAction(env, user, Number(m[1]), m[2]);
+    return carrierBookingAction(env, user, Number(m[1]), m[2], await readBody(request));
   }
 
   if (path === '/admin/overview' && method === 'GET') {

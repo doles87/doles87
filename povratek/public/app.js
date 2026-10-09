@@ -1,7 +1,11 @@
 // Povratek — mobilni spletni vmesnik (brez build koraka).
 
 const app = document.getElementById('app');
-const state = { me: null, carrier: null, places: [] };
+const state = { me: null, carrier: null, places: [], config: { policy: {} } };
+
+// Opravila, ki se počistijo ob menjavi strani (osveževanje, GPS, wake lock).
+const cleanups = [];
+const onLeave = (fn) => cleanups.push(fn);
 
 // ---------- pomožne funkcije ----------
 
@@ -380,7 +384,7 @@ async function viewRide({ params, query }) {
       <div class="sticky-foot">
         <div class="between" style="align-items:center;margin-bottom:10px"><span class="small muted" id="calc"></span><span class="mono" style="font-size:20px;font-weight:700" id="total"></span></div>
         <button class="btn" type="submit" id="book-btn"></button>
-        <p class="hint small" style="margin-top:9px">V testni fazi plačaš prevozniku ob vožnji. Povratek ne zaračuna ničesar vnaprej.</p>
+        <p class="hint small" style="margin-top:9px">V testni fazi plačaš prevozniku ob vožnji. ${policyText()}</p>
       </div>
     </form>
   </main>`, { tab: '#/' });
@@ -426,6 +430,41 @@ async function viewRide({ params, query }) {
 
 // ---------- potnik: moje rezervacije ----------
 
+function policyText() {
+  const p = state.config.policy;
+  if (!p.cancel_fee) return '';
+  return `Odpoved je brezplačna do ${p.free_hours} h pred prevzemom in ${p.grace_min} min po rezervaciji, kasneje ali ob neprihodu je pristojbina ${eur(p.cancel_fee)}. Če voznik zamuja ${p.late_min} min ali več, odpoveš brezplačno.`;
+}
+
+function liveHtml(l) {
+  if (l.picked_up) return html`<div class="notice teal">${svg(I.van, { size: 17 })}<div>Pobran si — srečno pot!</div></div>`;
+  if (!l.driver || !l.eta_at) {
+    return html`<div class="notice teal">${svg(I.van, { size: 17 })}<div><b>Voznik je začel vožnjo.</b> Čakam na njegovo lokacijo …</div></div>`;
+  }
+  const mins = l.eta_in_min;
+  const late = l.delay_min >= l.late_threshold_min;
+  const cls = late ? 'red' : l.delay_min > 0 ? '' : 'teal';
+  const status = late ? html`<b>Voznik zamuja ${l.delay_min} min.</b> Rezervacijo lahko odpoveš brezplačno.`
+    : l.delay_min > 0 ? html`Rahla zamuda ~${l.delay_min} min glede na dogovorjen prevzem ob ${fmtTime(l.pickup_time)}.`
+      : html`Pravočasno — dogovorjen prevzem ob ${fmtTime(l.pickup_time)}.`;
+  const [plat, plng] = l.pickup.coords;
+  const key = state.config.maps_embed_key;
+  const map = key
+    ? html`<iframe title="Zemljevid: voznik in tvoj prevzem" loading="lazy" style="width:100%;height:220px;border:0;border-radius:12px;margin-top:10px" referrerpolicy="no-referrer-when-downgrade"
+        src="https://www.google.com/maps/embed/v1/directions?key=${encodeURIComponent(key)}&origin=${l.driver.lat},${l.driver.lng}&destination=${plat},${plng}&mode=driving"></iframe>`
+    : html`<a class="btn ghost sm" style="margin-top:10px" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&origin=${l.driver.lat},${l.driver.lng}&destination=${plat},${plng}&travelmode=driving">${svg(I.nav, { size: 16 })} Poglej voznika na zemljevidu</a>`;
+  return html`<div class="live">
+    <div class="between" style="align-items:flex-end">
+      <div><div class="small muted">Prihod voznika na prevzem</div><div class="mono" style="font-size:26px;font-weight:700">${fmtTime(l.eta_at)}</div></div>
+      <div style="text-align:right"><div class="mono" style="font-size:18px;font-weight:700">čez ${mins} min</div>
+        <div class="small muted">${l.eta_source === 'google' ? 'promet v živo · Google' : 'ocena brez prometa'}</div></div>
+    </div>
+    <div class="notice ${cls}" style="margin-top:10px">${svg(late ? I.alert : I.clock, { size: 17 })}<div>${status}</div></div>
+    ${map}
+    <div class="small muted" style="margin-top:6px">Lokacija voznika posodobljena pred ${l.driver.age_s < 60 ? `${l.driver.age_s} s` : `${Math.round(l.driver.age_s / 60)} min`} · osvežuje se samodejno.</div>
+  </div>`;
+}
+
 async function viewMyBookings() {
   if (!requireLogin()) return;
   const head = html`<header class="top"><div class="grow"><div class="title" style="font-size:19px;font-weight:700">Moje rezervacije</div></div></header>`;
@@ -445,6 +484,9 @@ async function viewMyBookings() {
       <div class="mono small muted" style="margin-top:5px">${fmtWhen(b.departure_at)} · ${b.company_name}</div>
       <div class="small muted" style="margin-top:4px">${b.pickup} → ${b.dropoff} · ${b.kind === 'private' ? 'cel kombi' : persons(b.seats)}</div>
       ${b.flight_number ? html`<div class="small muted">Let <b class="mono" style="color:var(--ink)">${b.flight_number}</b></div>` : ''}
+      ${b.status === 'confirmed' && b.pickup_time ? html`<div class="small" style="margin-top:4px">Dogovorjen prevzem ob <b class="mono">${fmtTime(b.pickup_time)}</b>${b.pickup_time.slice(0, 10) !== b.departure_at.slice(0, 10) ? ` (${fmtDay(b.pickup_time)})` : ''}</div>` : ''}
+      ${b.cancel_fee ? html`<div class="small" style="margin-top:4px;color:var(--red)">Pristojbina ${eur(b.cancel_fee)} · ${b.cancel_reason || ''}</div>` : b.cancel_reason && b.status === 'cancelled' ? html`<div class="small muted" style="margin-top:4px">${b.cancel_reason}</div>` : ''}
+      ${b.status === 'confirmed' && b.started_at && b.ride_status === 'open' ? html`<div data-live="${b.id}" style="margin-top:10px"><p class="small muted">Nalagam sledenje …</p></div>` : ''}
       ${b.carrier_phone ? html`<a class="btn ghost sm" style="margin-top:10px" href="tel:${b.carrier_phone}">${svg(I.phone, { size: 16 })} Pokliči prevoznika · ${b.carrier_phone}</a>` : ''}
       <div class="between" style="align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--line-soft)">
         <span>${b.status === 'completed' ? (b.rating ? html`<span class="stars" aria-label="Ocena ${b.rating} od 5">${[1, 2, 3, 4, 5].map((n) => star(n <= b.rating, 16))}</span>` : html`<span class="small muted">Oceni vožnjo</span>`) : ''}</span>
@@ -457,19 +499,39 @@ async function viewMyBookings() {
         <div class="err" hidden></div>
         <button class="btn dark sm" type="submit">Oddaj oceno</button>
       </form>` : ''}
-      ${['pending', 'confirmed'].includes(b.status) && isFuture(b.departure_at) ? html`<button class="btn danger sm" style="margin-top:10px" data-cancel="${b.id}">Odpovej rezervacijo</button>` : ''}
+      ${['pending', 'confirmed'].includes(b.status) && !b.picked_up_at && b.ride_status === 'open' ? html`<button class="btn danger sm" style="margin-top:10px" data-cancel="${b.id}">Odpovej rezervacijo</button>` : ''}
     </article>`)}
   </main>`, { tab: '#/moje' });
 
   app.querySelectorAll('[data-cancel]').forEach((btn) => btn.addEventListener('click', async () => {
-    if (!confirm('Res želiš odpovedati to rezervacijo?')) return;
     btn.disabled = true;
     try {
-      await api(`/bookings/${btn.dataset.cancel}/cancel`, { method: 'POST', body: {} });
-      toast('Rezervacija je odpovedana.');
+      const { cancel } = await api(`/bookings/${btn.dataset.cancel}/live`);
+      const msg = cancel.free
+        ? `Odpoved je brezplačna (${cancel.reason})\n\nRes želiš odpovedati rezervacijo?`
+        : `${cancel.reason} Pri odpovedi zdaj platforma zadrži pristojbino ${eur(cancel.fee)}, vrne se ${eur(cancel.refund)}.\n\nRes želiš odpovedati?`;
+      if (!confirm(msg)) { btn.disabled = false; return; }
+      const res = await api(`/bookings/${btn.dataset.cancel}/cancel`, { method: 'POST', body: {} });
+      toast(res.fee ? `Rezervacija odpovedana. Pristojbina ${eur(res.fee)}.` : 'Rezervacija je brezplačno odpovedana.');
       viewMyBookings();
     } catch (e) { toast(e.message); btn.disabled = false; }
   }));
+
+  // Sledenje vozniku: osveževanje vsakih 30 s, dokler je stran odprta.
+  const liveEls = [...app.querySelectorAll('[data-live]')];
+  async function refreshLive() {
+    for (const el of liveEls) {
+      try {
+        const l = await api(`/bookings/${el.dataset.live}/live`);
+        el.innerHTML = piece(liveHtml(l));
+      } catch { /* naslednji poskus čez 30 s */ }
+    }
+  }
+  if (liveEls.length) {
+    refreshLive();
+    const timer = setInterval(refreshLive, 30000);
+    onLeave(() => clearInterval(timer));
+  }
   app.querySelectorAll('form.rate').forEach((form) => {
     const id = form.closest('[data-id]').dataset.id;
     form.querySelectorAll('[data-star]').forEach((s) => s.addEventListener('click', () => {
@@ -650,6 +712,13 @@ function mapsLink(pts) {
   return `https://www.google.com/maps/dir/?api=1&origin=${q(pts[0])}&destination=${q(pts[pts.length - 1])}${mid.length ? `&waypoints=${mid.map(q).join('%7C')}` : ''}&travelmode=driving`;
 }
 
+// Navigacija od trenutne lokacije (brez origin) prek preostalih točk do cilja.
+function navFromHere(pts) {
+  const q = (p) => encodeURIComponent(p.replace(' — ', ' '));
+  const mid = pts.slice(0, -1);
+  return `https://www.google.com/maps/dir/?api=1&destination=${q(pts[pts.length - 1])}${mid.length ? `&waypoints=${mid.map(q).join('%7C')}` : ''}&travelmode=driving`;
+}
+
 function carrierStatusNotice(c) {
   if (!c) return '';
   if (c.status === 'pending') return html`<div class="notice">${svg(I.clock, { size: 17, stroke: '#B9770E' })}<div><b>Licenca čaka na preverbo.</b> Podatke preverjamo v registrih AJPES in GZS. Ko jih potrdimo, lahko objavljaš vožnje.</div></div>`;
@@ -687,6 +756,8 @@ async function viewCarrier() {
           <div><b>${b.passenger_name}</b> · ${b.kind === 'private' ? 'zasebno' : persons(b.seats)} ${pill(b.status)}
             <div class="small muted">${city(b.pickup)} → ${city(b.dropoff)}${b.flight_number ? html` · let <b class="mono">${b.flight_number}</b>` : ''}</div>
             ${b.note ? html`<div class="small" style="margin-top:3px">„${b.note}“</div>` : ''}
+            ${b.status === 'confirmed' && b.pickup_time ? html`<div class="small">Prevzem ob <b class="mono">${fmtTime(b.pickup_time)}</b>${b.picked_up_at ? html` · <span class="pill ok">pobran</span>` : ''}</div>` : ''}
+            ${b.cancel_fee ? html`<div class="small" style="color:var(--red)">Pristojbina ${eur(b.cancel_fee)} · ${b.cancel_reason || ''}</div>` : ''}
             ${['confirmed', 'completed'].includes(b.status) && b.passenger_phone ? html`<a class="small" href="tel:${b.passenger_phone}">${b.passenger_phone}</a>` : ''}
             ${b.rating ? html`<div class="stars">${[1, 2, 3, 4, 5].map((n) => star(n <= b.rating, 13))}</div>` : ''}
           </div>
@@ -695,9 +766,14 @@ async function viewCarrier() {
         ${r.status === 'open' && b.status === 'pending' ? html`<div class="btns" style="margin-top:10px">
           <button class="btn sm" data-b="${b.id}" data-act="confirm">Potrdi</button>
           <button class="btn ghost sm" data-b="${b.id}" data-act="reject">Zavrni</button></div>` : ''}
-        ${r.status === 'open' && b.status === 'confirmed' && !isFuture(r.departure_at) ? html`<button class="btn ghost sm" style="margin-top:8px" data-b="${b.id}" data-act="no_show">Potnik ni prišel</button>` : ''}
+        ${r.status === 'open' && b.status === 'confirmed' && r.started_at && !b.picked_up_at ? html`<div class="btns" style="margin-top:8px">
+          <button class="btn teal sm" data-b="${b.id}" data-act="picked_up">Pobran</button>
+          <button class="btn ghost sm" data-b="${b.id}" data-act="no_show">Ni prišel</button></div>` : ''}
       </div>`)}
       ${r.status === 'open' ? html`<div class="stack" style="margin-top:12px">
+        ${r.started_at
+          ? html`<a class="btn teal sm" href="#/prevoznik/v-zivo/${r.id}">${svg(I.nav, { size: 16 })} Vožnja v teku — deli lokacijo</a>`
+          : html`<button class="btn teal sm" data-r="${r.id}" data-act="start">${svg(I.nav, { size: 16 })} Začni vožnjo in deli lokacijo</button>`}
         <a class="btn dark sm" href="${mapsLink(pts)}" target="_blank" rel="noopener">${svg(I.nav, { size: 16, stroke: '#F5A524' })} Navigiraj</a>
         <div class="btns">
           <button class="btn teal sm" data-r="${r.id}" data-act="complete">Zaključi vožnjo</button>
@@ -717,21 +793,38 @@ async function viewCarrier() {
     ${past.length ? html`<h2>Pretekle in zaključene</h2>${past.map(rideCard)}` : ''}
   </main>`, { tab: '#/prevoznik' });
 
-  const confirmText = {
-    complete: 'Zaključim vožnjo? Potrjene rezervacije bodo označene kot opravljene, nepotrjene pa zavrnjene.',
-    cancel: 'Odpovem vožnjo? Vse rezervacije bodo odpovedane — obvesti potnike po telefonu.',
-    reject: 'Zavrnem to rezervacijo?',
-    no_show: 'Potnik ni prišel na prevzem?',
-  };
+  bindCarrierActions(viewCarrier);
+}
+
+const CARRIER_CONFIRM = {
+  complete: 'Zaključim vožnjo? Potrjene rezervacije bodo označene kot opravljene, nepotrjene pa zavrnjene.',
+  cancel: 'Odpovem vožnjo? Vse rezervacije bodo odpovedane — obvesti potnike po telefonu.',
+  reject: 'Zavrnem to rezervacijo?',
+  no_show: 'Potnik ni prišel na prevzem? Potniku se zaračuna pristojbina za neprihod.',
+  start: 'Začnem vožnjo? Potniki bodo videli tvojo lokacijo in čas prihoda, dokler je stran vožnje odprta.',
+};
+const CARRIER_DONE = {
+  confirm: 'Rezervacija potrjena.', reject: 'Rezervacija zavrnjena.', complete: 'Vožnja zaključena.',
+  cancel: 'Vožnja odpovedana.', no_show: 'Neprihod zabeležen.', picked_up: 'Potnik pobran.', start: 'Vožnja se je začela.',
+};
+
+function bindCarrierActions(reload) {
   app.querySelectorAll('[data-act]').forEach((btn) => btn.addEventListener('click', async () => {
     const act = btn.dataset.act;
-    if (confirmText[act] && !confirm(confirmText[act])) return;
+    const body = {};
+    if (act === 'confirm') {
+      const t = prompt('Dogovorjen čas prevzema za tega potnika (HH:MM).\nPusti prazno, da ga predlaga sistem po oceni poti.', '');
+      if (t === null) return;
+      if (t.trim()) body.pickup_time = t.trim().replace('.', ':').padStart(5, '0');
+    } else if (CARRIER_CONFIRM[act] && !confirm(CARRIER_CONFIRM[act])) return;
     btn.disabled = true;
     try {
-      if (btn.dataset.b) await api(`/bookings/${btn.dataset.b}/${act}`, { method: 'POST', body: {} });
-      else await api(`/rides/${btn.dataset.r}/${act}`, { method: 'POST', body: {} });
-      toast({ confirm: 'Rezervacija potrjena.', reject: 'Rezervacija zavrnjena.', complete: 'Vožnja zaključena.', cancel: 'Vožnja odpovedana.', no_show: 'Zabeleženo.' }[act]);
-      viewCarrier();
+      if (btn.dataset.b) await api(`/bookings/${btn.dataset.b}/${act}`, { method: 'POST', body });
+      else await api(`/rides/${btn.dataset.r}/${act}`, { method: 'POST', body });
+      toast(CARRIER_DONE[act]);
+      if (act === 'start') go(`#/prevoznik/v-zivo/${btn.dataset.r}`);
+      else if (act === 'complete' && location.hash.startsWith('#/prevoznik/v-zivo')) go('#/prevoznik');
+      else reload();
     } catch (e) { toast(e.message); btn.disabled = false; }
   }));
 }
@@ -828,6 +921,74 @@ async function viewNewRide() {
   });
 }
 
+// Voznik med vožnjo: deli GPS lokacijo, vidi potnike po vrstnem redu prevzema.
+async function viewDriverLive({ params }) {
+  if (!requireLogin()) return;
+  if (state.me.role !== 'carrier') return go('#/');
+  const head = header({ title: 'Vožnja v teku', sub: 'Lokacija se deli s potniki', carrier: true });
+  const { rides } = await api('/carrier/rides');
+  const r = rides.find((x) => x.id === Number(params.id));
+  if (!r || r.status !== 'open' || !r.started_at) return go('#/prevoznik');
+  const pts = [r.origin, ...r.stops, r.destination];
+  const riders = r.bookings.filter((b) => b.status === 'confirmed')
+    .sort((a, b) => pts.indexOf(a.pickup) - pts.indexOf(b.pickup));
+  const next = riders.find((b) => !b.picked_up_at);
+  const rest = next ? [next.pickup, ...pts.slice(pts.indexOf(next.pickup) + 1)] : pts.slice(-1);
+
+  render(html`${head}<main>
+    <div class="card" id="gps"><b>GPS</b><div class="small muted">Zaganjam deljenje lokacije …</div></div>
+    <div class="notice">${svg(I.info, { size: 17, stroke: '#B9770E' })}<div>Pusti to stran odprto med vožnjo (zaslon ostane prižgan). Za navigacijo odpri Google Maps — ko se vrneš sem, se deljenje nadaljuje.</div></div>
+    <a class="btn dark" href="${navFromHere(rest)}" target="_blank" rel="noopener">${svg(I.nav, { size: 18, stroke: '#F5A524' })} Navigiraj${next ? ` do ${city(next.pickup)}` : ' do cilja'}</a>
+    <h2>Potniki po vrstnem redu prevzema</h2>
+    ${riders.length ? riders.map((b) => html`<article class="card">
+      <div class="between"><div><b>${b.passenger_name}</b> · ${b.kind === 'private' ? 'zasebno' : persons(b.seats)}
+        <div class="small muted">${b.pickup} → ${city(b.dropoff)}</div>
+        ${b.pickup_time ? html`<div class="small">Prevzem ob <b class="mono">${fmtTime(b.pickup_time)}</b></div>` : ''}
+        ${b.flight_number ? html`<div class="small muted">Let <b class="mono">${b.flight_number}</b></div>` : ''}
+        ${b.note ? html`<div class="small">„${b.note}“</div>` : ''}</div>
+        ${b.picked_up_at ? html`<span class="pill ok">pobran</span>` : html`<span class="pill wait">čaka</span>`}</div>
+      ${b.picked_up_at ? '' : html`<div class="btns" style="margin-top:10px">
+        ${b.passenger_phone ? html`<a class="btn ghost sm" href="tel:${b.passenger_phone}">${svg(I.phone, { size: 15 })} Kliči</a>` : ''}
+        <button class="btn teal sm" data-b="${b.id}" data-act="picked_up">Pobran</button>
+        <button class="btn ghost sm" data-b="${b.id}" data-act="no_show">Ni prišel</button></div>`}
+    </article>`) : html`<div class="card empty small">Na tej vožnji ni potrjenih potnikov.</div>`}
+    <button class="btn teal" data-r="${r.id}" data-act="complete">Zaključi vožnjo</button>
+  </main>`, { tab: '#/prevoznik', feedback: false });
+  bindCarrierActions(() => viewDriverLive({ params }));
+
+  const gps = app.querySelector('#gps');
+  const show = (title, text, ok = true) => { gps.innerHTML = piece(html`<b style="color:${ok ? 'var(--teal)' : 'var(--red)'}">${title}</b><div class="small muted">${text}</div>`); };
+  if (!('geolocation' in navigator)) { show('GPS ni na voljo', 'Ta brskalnik ne podpira lokacije.', false); return; }
+
+  let lastSent = 0;
+  let lastFix = null;
+  async function send(force = false) {
+    if (!lastFix || (!force && Date.now() - lastSent < 15000)) return;
+    lastSent = Date.now();
+    try {
+      await api(`/rides/${r.id}/location`, { method: 'POST', body: lastFix });
+      show('Lokacija se deli', `Zadnja posodobitev ob ${new Date().toLocaleTimeString('sl-SI', { hour: '2-digit', minute: '2-digit', second: '2-digit' })} · natančnost ~${Math.round(lastFix.accuracy || 0)} m`);
+    } catch (e) { show('Pošiljanje ni uspelo', e.message, false); }
+  }
+  const watchId = navigator.geolocation.watchPosition(
+    (pos) => { lastFix = { lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy }; send(); },
+    (err) => show('Lokacija ni dovoljena', err.code === 1 ? 'Dovoli dostop do lokacije v nastavitvah brskalnika in osveži stran.' : err.message, false),
+    { enableHighAccuracy: true, maximumAge: 10000, timeout: 30000 },
+  );
+  const timer = setInterval(() => send(true), 30000);
+  let lock = null;
+  const keepAwake = async () => { try { lock = await navigator.wakeLock?.request('screen'); } catch { /* ni podprto */ } };
+  const onVisible = () => { if (document.visibilityState === 'visible') { keepAwake(); send(true); } };
+  keepAwake();
+  document.addEventListener('visibilitychange', onVisible);
+  onLeave(() => {
+    navigator.geolocation.clearWatch(watchId);
+    clearInterval(timer);
+    document.removeEventListener('visibilitychange', onVisible);
+    lock?.release?.();
+  });
+}
+
 function viewCarrierDetails() {
   if (!requireLogin()) return;
   if (state.me.role !== 'carrier') return go('#/');
@@ -897,8 +1058,8 @@ async function viewAdmin() {
     ${data.rides.map((r) => html`<tr><td class="mono">${r.departure_at.replace('T', ' ')}</td><td>${city(r.origin)} → ${city(r.destination)}${r.stops.length ? html`<div class="small muted">prek ${r.stops.map(city).join(', ')}</div>` : ''}</td><td>${r.company_name}</td><td class="mono">${r.seats_total - r.seats_left}/${r.seats_total}</td><td class="mono">${eur(r.price_per_seat)}${r.private_allowed ? html`<div class="small muted">zas. ${eur(r.private_price)}</div>` : ''}</td><td>${pill(r.status)}</td><td>${r.status === 'open' ? html`<button class="btn danger sm" style="height:34px;padding:0 10px" data-ride-cancel="${r.id}">Odpovej</button>` : ''}</td></tr>`)}
   </tbody></table></div>`;
 
-  const bookingsHtml = html`<div class="table-wrap"><table><thead><tr><th>Oddano</th><th>Odhod</th><th>Relacija</th><th>Potnik</th><th>Prevoznik</th><th>Tip</th><th>Znesek</th><th>Status</th></tr></thead><tbody>
-    ${data.bookings.map((b) => html`<tr><td class="small">${b.created_at}</td><td class="mono">${b.departure_at.replace('T', ' ')}</td><td>${city(b.pickup)} → ${city(b.dropoff)}</td><td>${b.passenger_name}</td><td>${b.company_name}</td><td>${b.kind === 'private' ? 'zasebna' : `deljena · ${b.seats}`}</td><td class="mono">${eur(b.total)}</td><td>${pill(b.status)}</td></tr>`)}
+  const bookingsHtml = html`<div class="table-wrap"><table><thead><tr><th>Oddano</th><th>Odhod</th><th>Relacija</th><th>Potnik</th><th>Prevoznik</th><th>Tip</th><th>Znesek</th><th>Status</th><th>Pristojbina</th></tr></thead><tbody>
+    ${data.bookings.map((b) => html`<tr><td class="small">${b.created_at}</td><td class="mono">${b.departure_at.replace('T', ' ')}</td><td>${city(b.pickup)} → ${city(b.dropoff)}</td><td>${b.passenger_name}</td><td>${b.company_name}</td><td>${b.kind === 'private' ? 'zasebna' : `deljena · ${b.seats}`}</td><td class="mono">${eur(b.total)}</td><td>${pill(b.status)}</td><td class="small">${b.cancel_fee ? html`<b class="mono">${eur(b.cancel_fee)}</b> · ${b.cancel_reason || ''}` : b.cancel_reason || ''}</td></tr>`)}
   </tbody></table></div>`;
 
   const usersHtml = html`<div class="table-wrap"><table><thead><tr><th>Ime</th><th>E-pošta</th><th>Telefon</th><th>Vloga</th><th>Registriran</th></tr></thead><tbody>
@@ -916,6 +1077,7 @@ async function viewAdmin() {
       <div class="kpi"><div class="k">Opravljene vožnje</div><div class="v">${s.rides_completed}</div><div class="s">${s.rides_upcoming} prihajajočih</div></div>
       <div class="kpi"><div class="k">Zasedenost sedežev</div><div class="v">${fill} %</div><div class="s">${s.seats_sold} / ${s.seats_offered}</div></div>
       <div class="kpi"><div class="k">Rezervacije</div><div class="v">${s.bookings}</div><div class="s">${s.passengers} potnikov</div></div>
+      <div class="kpi"><div class="k">Pristojbine za odpoved</div><div class="v">${eur(s.cancel_fees)}</div><div class="s">${s.cancel_fee_count} odpovedi / neprihodov</div></div>
       <div class="kpi"><div class="k">Aktivni prevozniki</div><div class="v">${s.carriers_approved}</div><div class="s">${s.carriers_pending} čaka preverbo</div></div>
     </div>
     <div class="tabs" role="tablist">${tabs.map(([k, l]) => html`<button role="tab" data-tab="${k}" aria-selected="${adminTab === k}">${l}</button>`)}</div>
@@ -959,11 +1121,13 @@ const routes = [
   [/^\/profil$/, viewProfile],
   [/^\/prevoznik$/, viewCarrier],
   [/^\/prevoznik\/nova$/, viewNewRide],
+  [/^\/prevoznik\/v-zivo\/(?<id>\d+)$/, viewDriverLive],
   [/^\/prevoznik\/podatki$/, viewCarrierDetails],
   [/^\/admin$/, viewAdmin],
 ];
 
 async function route() {
+  while (cleanups.length) { try { cleanups.pop()(); } catch { /* ignoriraj */ } }
   const { path, query } = parseHash();
   for (const [re, view] of routes) {
     const m = path.match(re);
@@ -988,8 +1152,9 @@ async function loadMe() {
 
 async function start() {
   try {
-    const [, places] = await Promise.all([loadMe(), api('/places')]);
+    const [, places, config] = await Promise.all([loadMe(), api('/places'), api('/config')]);
     state.places = places.places;
+    state.config = config;
   } catch {
     app.innerHTML = '<main><div class="err">Strežnik trenutno ni dosegljiv. Poskusi znova čez minuto.</div></main>';
     return;

@@ -17,3 +17,15 @@ migrations_dir = "migrations"
 
 # ADMIN_EMAILS (e-naslovi, ki ob registraciji dobijo vlogo admin, ločeni z vejico)
 # nastavi kot skrivnost: `npx wrangler secret put ADMIN_EMAILS`, lokalno pa v datoteki .dev.vars.
+
+[vars]
+# Pravila odpovedi (zneski v evrih, časi v minutah/urah).
+CANCEL_FEE_EUR = "4"
+FREE_CANCEL_GRACE_MIN = "10"
+FREE_CANCEL_HOURS = "2"
+LATE_THRESHOLD_MIN = "15"
+NO_SHOW_WAIT_MIN = "5"
+
+# Google Maps (neobvezno; brez ključev aplikacija uporablja oceno brez prometa in povezavo na Google Maps):
+#   npx wrangler secret put GOOGLE_MAPS_API_KEY    -> Routes API, prihod s prometom v živo (strežniški ključ)
+#   npx wrangler secret put GOOGLE_MAPS_EMBED_KEY  -> Maps Embed API, zemljevid za potnika (ključ omejen na domeno)
